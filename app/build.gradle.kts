@@ -3,11 +3,11 @@ plugins {
 }
 
 android {
-    namespace = "com.example.module"
-    compileSdk = 36 // Can be modified as needed
+    namespace = "be.zvz.sony.launchersearchenhancer"
+    compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.example.module"
+        applicationId = namespace
         minSdk = 31
         versionCode = 1
         versionName = "1.0.0"
