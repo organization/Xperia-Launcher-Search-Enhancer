@@ -31,7 +31,6 @@ public class QueryHistoryStore {
         if (entries.size() > MAX) entries.remove(0);
     }
 
-
     public synchronized List<String> getRecentBefore(String current, long now, long windowMs, int limit) {
         ArrayList<String> out = new ArrayList<>();
         for (int i = entries.size() - 1; i >= 0 && out.size() < limit; i--) {
@@ -44,15 +43,10 @@ public class QueryHistoryStore {
         return out;
     }
 
-    public synchronized boolean isStable(String q, long now, long minAgeMs) {
-        if (TextUtils.isEmpty(q) || entries.isEmpty()) return false;
-        Entry last = entries.get(entries.size() - 1);
-        return q.equals(last.q) && (now - last.ts) >= minAgeMs;
-    }
-
     private static final class Entry {
         String q;
         long ts;
+
         Entry(String q, long ts) {
             this.q = q;
             this.ts = ts;

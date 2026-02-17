@@ -4,7 +4,6 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.text.TextUtils;
 
-import java.util.List;
 import java.util.Map;
 
 public class LearningStore {
@@ -12,11 +11,10 @@ public class LearningStore {
     private static final String K_COMP = "c:";
     private static final String K_CNT = "n:";
     private static final String K_TS = "t:";
-    private static final long DECAY_MS = 14L * 24L * 60L * 60L * 1000L;
 
-    private static final long SOFT_EXPIRE_MS = 14L * 24L * 60L * 60L * 1000L; // 2 weeks
-    private static final long HARD_EXPIRE_MS = 30L * 24L * 60L * 60L * 1000L; // 1 month
-    private static final long GC_INTERVAL_MS = 24L * 60L * 60L * 1000L; // 1 day
+    private static final long SOFT_EXPIRE_MS = 14L * 24L * 60L * 60L * 1000L;
+    private static final long HARD_EXPIRE_MS = 30L * 24L * 60L * 60L * 1000L;
+    private static final long GC_INTERVAL_MS = 24L * 60L * 60L * 1000L;
     private static final String K_LAST_GC = "__last_gc";
 
     public void observe(Context c, String queryNorm, String component) {
@@ -48,66 +46,7 @@ public class LearningStore {
                 .apply();
     }
 
-    public void observeWithHistory(Context c, String currentQuery, String component, List<String> historyQueries) {
-        observe(c, currentQuery, component);
-
-        if (historyQueries == null || historyQueries.isEmpty()) return;
-        for (String q : historyQueries) {
-            if (TextUtils.isEmpty(q)) continue;
-            if (q.equals(currentQuery)) continue;
-
-            observeBridge(c, q, component);
-        }
-    }
-
-    public void observeWithHistoryAndPending(Context c, String currentQuery, String component,
-                                             List<String> historyQueries, List<String> pendingQueries) {
-        observe(c, currentQuery, component);
-
-        int applied = 0;
-        if (historyQueries != null) {
-            for (String q : historyQueries) {
-                if (applied >= 2) break;
-                if (TextUtils.isEmpty(q) || q.equals(currentQuery) || q.length() < 2) continue;
-                observeBridge(c, q, component);
-                applied++;
-            }
-        }
-
-        int weakApplied = 0;
-        if (pendingQueries != null) {
-            for (String q : pendingQueries) {
-                if (weakApplied >= 2) break;
-                if (TextUtils.isEmpty(q) || q.equals(currentQuery) || q.length() < 2) continue;
-                observeWeakBridge(c, q, component);
-                weakApplied++;
-            }
-        }
-    }
-
-    private void observeWeakBridge(Context c, String queryNorm, String component) {
-        SharedPreferences sp = c.getSharedPreferences(PREF, Context.MODE_PRIVATE);
-        String compKey = K_COMP + queryNorm;
-        String cntKey = K_CNT + queryNorm;
-        String tsKey = K_TS + queryNorm;
-
-        String prevComp = sp.getString(compKey, "");
-        int cnt = sp.getInt(cntKey, 0);
-
-        if (component.equals(prevComp)) {
-            cnt = Math.min(cnt + 1, 6);
-        } else {
-            cnt = 1;
-        }
-
-        sp.edit()
-                .putString(compKey, component)
-                .putInt(cntKey, cnt)
-                .putLong(tsKey, System.currentTimeMillis())
-                .apply();
-    }
-
-    private void observeBridge(Context c, String queryNorm, String component) {
+    public void observeWeakBridge(Context c, String queryNorm, String component) {
         if (c == null || TextUtils.isEmpty(queryNorm) || TextUtils.isEmpty(component)) return;
         if (queryNorm.length() < 2) return;
 
@@ -120,7 +59,7 @@ public class LearningStore {
         int cnt = sp.getInt(cntKey, 0);
 
         if (component.equals(prevComp)) {
-            cnt = Math.min(cnt + 1, 8);
+            cnt = Math.min(cnt + 1, 6);
         } else {
             cnt = 1;
         }
@@ -158,7 +97,7 @@ public class LearningStore {
 
         if (age > SOFT_EXPIRE_MS) {
             long decayAge = age - SOFT_EXPIRE_MS;
-            long steps = decayAge / (7L * 24L * 60L * 60L * 1000L); // per week
+            long steps = decayAge / (7L * 24L * 60L * 60L * 1000L);
             for (long i = 0; i <= steps; i++) {
                 base /= 2;
                 if (base <= 0) return 0;

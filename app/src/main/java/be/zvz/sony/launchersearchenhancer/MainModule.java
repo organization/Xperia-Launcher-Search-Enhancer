@@ -26,6 +26,7 @@ import be.zvz.sony.launchersearchenhancer.reranker.SemanticReranker;
 import be.zvz.sony.launchersearchenhancer.store.LearningStore;
 import be.zvz.sony.launchersearchenhancer.store.PendingQueryStore;
 import be.zvz.sony.launchersearchenhancer.store.QueryHistoryStore;
+import be.zvz.sony.launchersearchenhancer.store.SearchSessionStore;
 import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.annotations.BeforeInvocation;
@@ -99,6 +100,7 @@ public class MainModule extends XposedModule {
     private static final SemanticReranker sSemanticReranker = new SemanticReranker();
     private static final LearningStore sLearningStore = new LearningStore();
     private static final QueryHistoryStore sQueryHistoryStore = new QueryHistoryStore();
+    private static final SearchSessionStore sSearchSessionStore = new SearchSessionStore();
     private static final PendingQueryStore sPendingQueryStore = new PendingQueryStore();
 
     public MainModule(XposedInterface base, ModuleLoadedParam param) {
@@ -227,19 +229,26 @@ public class MainModule extends XposedModule {
                 String current = normalize(query);
                 long now = System.currentTimeMillis();
 
-                sQueryHistoryStore.record(current, now);
+                sLearningStore.observe(clicked.getContext(), current, component);
+
+                String bridge = sPendingQueryStore.pollLatestUnresolvedFromOlderSession(
+                        current,
+                        now,
+                        20_000L,
+                        sSearchSessionStore.getSessionId()
+                );
+
+                if (TextUtils.isEmpty(bridge)) {
+                    List<String> recent = sQueryHistoryStore.getRecentBefore(current, now, 15_000L, 4);
+                    bridge = pickBridgeCandidate(current, recent);
+                }
+
+                if (!TextUtils.isEmpty(bridge)) {
+                    sLearningStore.observeWeakBridge(clicked.getContext(), bridge, component);
+                }
+
                 sPendingQueryStore.markResolved(current, now);
 
-                List<String> recent = sQueryHistoryStore.getRecentBefore(current, now, 10000L, 6);
-                List<String> pending = sPendingQueryStore.getRecentNoResultBefore(current, now, 20000L, 4);
-
-                sLearningStore.observeWithHistoryAndPending(
-                        clicked.getContext(),
-                        current,
-                        component,
-                        recent,
-                        pending
-                );
             } catch (Throwable t) {
                 module.log("ClickLearningHooker failed", t);
             }
@@ -256,13 +265,18 @@ public class MainModule extends XposedModule {
                 String rawQuery = (String) callback.getArgs()[2];
                 String qNorm = normalize(rawQuery);
                 long now = System.currentTimeMillis();
-                if (!TextUtils.isEmpty(qNorm)) {
+
+                if (TextUtils.isEmpty(qNorm)) {
+                    sSearchSessionStore.onCleared(now);
+                } else {
+                    sSearchSessionStore.record(qNorm, now);
                     sQueryHistoryStore.record(qNorm, now);
                 }
+
                 ArrayList<Object> result = buildSearchResults(context, originalApps, rawQuery);
 
-                if (result.isEmpty()) {
-                    sPendingQueryStore.recordNoResult(qNorm, now);
+                if (!TextUtils.isEmpty(qNorm) && result.isEmpty()) {
+                    sPendingQueryStore.recordNoResult(qNorm, now, sSearchSessionStore.getSessionId());
                 }
 
                 callback.returnAndSkip(result);
@@ -271,6 +285,18 @@ public class MainModule extends XposedModule {
                 module.log("SearchAlgorithmHooker failed, fallback original", t);
             }
         }
+    }
+
+    private static String pickBridgeCandidate(String current, List<String> recent) {
+        if (recent == null || recent.isEmpty()) return "";
+        for (String q : recent) {
+            if (TextUtils.isEmpty(q) || q.length() < 2) continue;
+            if (q.equals(current)) continue;
+            if (current.startsWith(q) || q.startsWith(current)) {
+                return q;
+            }
+        }
+        return "";
     }
 
     private static ArrayList<Object> buildSearchResults(Context context, List<?> originalApps, String rawQuery) throws Throwable {
@@ -498,9 +524,7 @@ public class MainModule extends XposedModule {
 
     private static String normalize(String s) {
         if (s == null) return "";
-        return Normalizer.normalize(s, Normalizer.Form.NFKC)
-                .toLowerCase(Locale.ROOT)
-                .trim();
+        return Normalizer.normalize(s, Normalizer.Form.NFKC).toLowerCase(Locale.ROOT).trim();
     }
 
     private static boolean isMostlyLatin(String s) {
