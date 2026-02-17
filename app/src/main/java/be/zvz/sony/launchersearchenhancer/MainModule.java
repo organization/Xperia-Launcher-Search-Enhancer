@@ -3,6 +3,7 @@ package be.zvz.sony.launchersearchenhancer;
 import android.annotation.SuppressLint;
 import android.content.Context;
 import android.text.TextUtils;
+import android.view.View;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
@@ -19,6 +20,12 @@ import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
+import be.zvz.sony.launchersearchenhancer.record.AppForms;
+import be.zvz.sony.launchersearchenhancer.record.ScoredApp;
+import be.zvz.sony.launchersearchenhancer.reranker.SemanticReranker;
+import be.zvz.sony.launchersearchenhancer.store.LearningStore;
+import be.zvz.sony.launchersearchenhancer.store.PendingQueryStore;
+import be.zvz.sony.launchersearchenhancer.store.QueryHistoryStore;
 import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.annotations.BeforeInvocation;
@@ -33,6 +40,7 @@ public class MainModule extends XposedModule {
     private static final String CLASS_APPINFO = "com.android.launcher3.model.data.AppInfo";
     private static final String CLASS_ADAPTER_ITEM = "com.android.launcher3.allapps.BaseAllAppsAdapter$AdapterItem";
     private static final String CLASS_HOTSEAT_QSB = "com.android.searchlauncher.HotseatQsbWidget";
+    private static final String CLASS_ITEM_CLICK_HANDLER = "com.android.launcher3.touch.ItemClickHandler";
 
     private static final int MAX_RESULTS = 5;
 
@@ -73,6 +81,7 @@ public class MainModule extends XposedModule {
     private static Field sComponentNameField;
     private static Method sGetPackageNameMethod;
     private static Field sFallbackSearchViewField;
+    private static Method sGetTargetComponentMethod;
 
     private static final ConcurrentHashMap<String, List<String>> sQueryConversions = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<String, Object> sIcuMap = new ConcurrentHashMap<>();
@@ -86,6 +95,11 @@ public class MainModule extends XposedModule {
             'ㄱ', 'ㄲ', 'ㄴ', 'ㄷ', 'ㄸ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅃ', 'ㅅ',
             'ㅆ', 'ㅇ', 'ㅈ', 'ㅉ', 'ㅊ', 'ㅋ', 'ㅌ', 'ㅍ', 'ㅎ'
     };
+
+    private static final SemanticReranker sSemanticReranker = new SemanticReranker();
+    private static final LearningStore sLearningStore = new LearningStore();
+    private static final QueryHistoryStore sQueryHistoryStore = new QueryHistoryStore();
+    private static final PendingQueryStore sPendingQueryStore = new PendingQueryStore();
 
     public MainModule(XposedInterface base, ModuleLoadedParam param) {
         super(base, param);
@@ -132,9 +146,23 @@ public class MainModule extends XposedModule {
             Method onSearchResult = findMethod(hotseatClass, "onSearchResult", String.class, ArrayList.class);
             hook(onSearchResult, StaleResultBlockerHooker.class);
 
+            try {
+                Class<?> itemInfoClass = cl.loadClass("com.android.launcher3.model.data.ItemInfo");
+                sGetTargetComponentMethod = findMethod(itemInfoClass, "getTargetComponent");
+            } catch (Throwable ignored) {
+            }
+
+            try {
+                Class<?> clickClass = cl.loadClass(CLASS_ITEM_CLICK_HANDLER);
+                Method onClick = findMethod(clickClass, "onClick", View.class);
+                hook(onClick, ClickLearningHooker.class);
+            } catch (Throwable t) {
+                log("Click learning hook registration failed", t);
+            }
+
             log("Search enhancement hooks registered successfully.");
         } catch (Throwable t) {
-            log("Failed to register search enhancement hooks", t);
+            log("Failed to register hooks", t);
         }
     }
 
@@ -181,6 +209,44 @@ public class MainModule extends XposedModule {
     }
 
     @XposedHooker
+    private static class ClickLearningHooker implements Hooker {
+        @BeforeInvocation
+        public static void before(@NonNull BeforeHookCallback callback) {
+            try {
+                View clicked = (View) callback.getArgs()[0];
+                if (clicked == null) return;
+                Object tag = clicked.getTag();
+                if (tag == null) return;
+
+                String component = getComponentFromItem(tag);
+                if (TextUtils.isEmpty(component)) return;
+
+                String query = extractCurrentQueryFromRoot(clicked);
+                if (TextUtils.isEmpty(query)) return;
+
+                String current = normalize(query);
+                long now = System.currentTimeMillis();
+
+                sQueryHistoryStore.record(current, now);
+                sPendingQueryStore.markResolved(current, now);
+
+                List<String> recent = sQueryHistoryStore.getRecentBefore(current, now, 10000L, 6);
+                List<String> pending = sPendingQueryStore.getRecentNoResultBefore(current, now, 20000L, 4);
+
+                sLearningStore.observeWithHistoryAndPending(
+                        clicked.getContext(),
+                        current,
+                        component,
+                        recent,
+                        pending
+                );
+            } catch (Throwable t) {
+                module.log("ClickLearningHooker failed", t);
+            }
+        }
+    }
+
+    @XposedHooker
     private static class SearchAlgorithmHooker implements Hooker {
         @BeforeInvocation
         public static void before(@NonNull BeforeHookCallback callback) {
@@ -188,9 +254,19 @@ public class MainModule extends XposedModule {
                 Context context = (Context) callback.getArgs()[0];
                 List<?> originalApps = (List<?>) callback.getArgs()[1];
                 String rawQuery = (String) callback.getArgs()[2];
-
+                String qNorm = normalize(rawQuery);
+                long now = System.currentTimeMillis();
+                if (!TextUtils.isEmpty(qNorm)) {
+                    sQueryHistoryStore.record(qNorm, now);
+                }
                 ArrayList<Object> result = buildSearchResults(context, originalApps, rawQuery);
+
+                if (result.isEmpty()) {
+                    sPendingQueryStore.recordNoResult(qNorm, now);
+                }
+
                 callback.returnAndSkip(result);
+
             } catch (Throwable t) {
                 module.log("SearchAlgorithmHooker failed, fallback original", t);
             }
@@ -230,6 +306,7 @@ public class MainModule extends XposedModule {
 
             String title = getAppTitle(app);
             String pkg = getPackageName(app);
+            String component = getComponentFromItem(app);
 
             AppForms forms = buildAppForms(title, pkg);
 
@@ -239,23 +316,66 @@ public class MainModule extends XposedModule {
                 if (s > best) best = s;
             }
 
+            if (context != null && !TextUtils.isEmpty(component)) {
+                best += sLearningStore.getBonus(context, queryNorm, component);
+            }
+
             if (best <= 0) continue;
-            scored.add(new ScoredApp(app, best, forms.titleNorm, forms.pkgNorm));
+            scored.add(new ScoredApp(app, best, forms.titleNorm(), forms.pkgNorm(), title, pkg));
         }
 
         scored.sort((a, b) -> {
-            if (a.score != b.score) return Integer.compare(b.score, a.score);
-            int t = a.normTitle.compareTo(b.normTitle);
+            if (a.score() != b.score()) return Integer.compare(b.score(), a.score());
+            int t = a.normTitle().compareTo(b.normTitle());
             if (t != 0) return t;
-            return a.normPkg.compareTo(b.normPkg);
+            return a.normPkg().compareTo(b.normPkg());
         });
 
-        int count = Math.min(MAX_RESULTS, scored.size());
+        ArrayList<SemanticReranker.Candidate> aiCandidates = new ArrayList<>(scored.size());
+        for (ScoredApp s : scored) {
+            aiCandidates.add(new SemanticReranker.Candidate(s.app(), s.rawTitle(), s.rawPkg(), s.score()));
+        }
+        sSemanticReranker.rerank(context, rawQuery, aiCandidates);
+
+        int count = Math.min(MAX_RESULTS, aiCandidates.size());
         for (int i = 0; i < count; i++) {
-            output.add(sAsAppMethod.invoke(null, scored.get(i).app));
+            output.add(sAsAppMethod.invoke(null, aiCandidates.get(i).app));
         }
 
         return output;
+    }
+
+    @SuppressLint("DiscouragedApi")
+    private static String extractCurrentQueryFromRoot(View clicked) {
+        try {
+            Context c = clicked.getContext();
+            int id = c.getResources().getIdentifier("fallback_search_view", "id", TARGET_PACKAGE);
+            if (id == 0) return "";
+            View root = clicked.getRootView();
+            if (root == null) return "";
+            View search = root.findViewById(id);
+            if (search instanceof TextView) {
+                return String.valueOf(((TextView) search).getText());
+            }
+        } catch (Throwable ignored) {
+        }
+        return "";
+    }
+
+    private static String getComponentFromItem(Object item) {
+        try {
+            if (item == null) return "";
+            if (sComponentNameField != null) {
+                Object cn = sComponentNameField.get(item);
+                if (cn != null) return String.valueOf(cn);
+            }
+            if (sGetTargetComponentMethod != null) {
+                Object cn = sGetTargetComponentMethod.invoke(item);
+                if (cn != null) return String.valueOf(cn);
+            }
+        } catch (Throwable ignored) {
+        }
+        return "";
     }
 
     private static LinkedHashSet<String> buildQueryVariants(String raw) {
@@ -315,44 +435,31 @@ public class MainModule extends XposedModule {
         String titleJamo = normalize(decomposeHangulToJamo(titleRaw));
         String pkgNorm = normalize(pkgRaw);
 
-        return new AppForms(
-                titleNorm, titleHira, titleKata, titleKanaLoose, titleLatin, titleCho, titleJamo, pkgNorm
-        );
+        return new AppForms(titleNorm, titleHira, titleKata, titleKanaLoose, titleLatin, titleCho, titleJamo, pkgNorm);
     }
 
     private static int scoreWithForms(String q, AppForms f) {
         if (TextUtils.isEmpty(q)) return 0;
         int best = 0;
 
-        best = Math.max(best, scoreBasic(q, f.titleNorm,
-                SCORE_TITLE_EXACT, SCORE_TITLE_PREFIX, SCORE_TITLE_WORD_PREFIX, SCORE_TITLE_CONTAINS));
+        best = Math.max(best, scoreBasic(q, f.titleNorm(), SCORE_TITLE_EXACT, SCORE_TITLE_PREFIX, SCORE_TITLE_WORD_PREFIX, SCORE_TITLE_CONTAINS));
+        best = Math.max(best, scoreBasic(q, f.titleHira(), SCORE_KANA_EXACT, SCORE_KANA_PREFIX, SCORE_KANA_WORD_PREFIX, SCORE_KANA_CONTAINS));
+        best = Math.max(best, scoreBasic(q, f.titleKata(), SCORE_KANA_EXACT, SCORE_KANA_PREFIX, SCORE_KANA_WORD_PREFIX, SCORE_KANA_CONTAINS));
+        best = Math.max(best, scoreBasic(q, f.titleKanaLoose(), SCORE_KANA_EXACT - 40, SCORE_KANA_PREFIX - 40, SCORE_KANA_WORD_PREFIX - 30, SCORE_KANA_CONTAINS));
 
-        best = Math.max(best, scoreBasic(q, f.titleHira,
-                SCORE_KANA_EXACT, SCORE_KANA_PREFIX, SCORE_KANA_WORD_PREFIX, SCORE_KANA_CONTAINS));
-
-        best = Math.max(best, scoreBasic(q, f.titleKata,
-                SCORE_KANA_EXACT, SCORE_KANA_PREFIX, SCORE_KANA_WORD_PREFIX, SCORE_KANA_CONTAINS));
-
-        best = Math.max(best, scoreBasic(q, f.titleKanaLoose,
-                SCORE_KANA_EXACT - 40, SCORE_KANA_PREFIX - 40, SCORE_KANA_WORD_PREFIX - 30, SCORE_KANA_CONTAINS));
-
-        if (!TextUtils.isEmpty(f.titleLatin)) {
-            best = Math.max(best, scoreBasic(q, f.titleLatin,
-                    SCORE_LATIN_EXACT, SCORE_LATIN_PREFIX, SCORE_LATIN_WORD_PREFIX, SCORE_LATIN_CONTAINS));
+        if (!TextUtils.isEmpty(f.titleLatin())) {
+            best = Math.max(best, scoreBasic(q, f.titleLatin(), SCORE_LATIN_EXACT, SCORE_LATIN_PREFIX, SCORE_LATIN_WORD_PREFIX, SCORE_LATIN_CONTAINS));
         }
 
-        if (!TextUtils.isEmpty(f.titleCho)) {
-            best = Math.max(best, scoreBasic(q, f.titleCho,
-                    SCORE_CHOSEONG_EXACT, SCORE_CHOSEONG_PREFIX, SCORE_CHOSEONG_WORD_PREFIX, SCORE_CHOSEONG_CONTAINS));
+        if (!TextUtils.isEmpty(f.titleCho())) {
+            best = Math.max(best, scoreBasic(q, f.titleCho(), SCORE_CHOSEONG_EXACT, SCORE_CHOSEONG_PREFIX, SCORE_CHOSEONG_WORD_PREFIX, SCORE_CHOSEONG_CONTAINS));
         }
 
-        if (!TextUtils.isEmpty(f.titleJamo)) {
-            best = Math.max(best, scoreBasic(q, f.titleJamo,
-                    SCORE_JAMO_EXACT, SCORE_JAMO_PREFIX, SCORE_JAMO_WORD_PREFIX, SCORE_JAMO_CONTAINS));
+        if (!TextUtils.isEmpty(f.titleJamo())) {
+            best = Math.max(best, scoreBasic(q, f.titleJamo(), SCORE_JAMO_EXACT, SCORE_JAMO_PREFIX, SCORE_JAMO_WORD_PREFIX, SCORE_JAMO_CONTAINS));
         }
 
-        best = Math.max(best, scorePackage(q, f.pkgNorm));
-
+        best = Math.max(best, scorePackage(q, f.pkgNorm()));
         return best;
     }
 
@@ -460,8 +567,7 @@ public class MainModule extends XposedModule {
         StringBuilder out = new StringBuilder(k.length());
         for (int i = 0; i < k.length(); i++) {
             char c = k.charAt(i);
-            if (c == 'ー') continue;
-            if (c == '・') continue;
+            if (c == 'ー' || c == '・') continue;
             out.append(expandSmallKana(c));
         }
         return out.toString();
@@ -524,7 +630,8 @@ public class MainModule extends XposedModule {
         StringBuilder out = new StringBuilder(t.length() * 2);
         int i = 0;
         while (i < t.length()) {
-            if (i + 1 < t.length() && t.charAt(i) == t.charAt(i + 1) && isConsonant(t.charAt(i)) && t.charAt(i) != 'n') {
+            if (i + 1 < t.length() && t.charAt(i) == t.charAt(i + 1)
+                    && isConsonant(t.charAt(i)) && t.charAt(i) != 'n') {
                 out.append('ッ');
                 i++;
                 continue;
@@ -797,13 +904,5 @@ public class MainModule extends XposedModule {
             }
         }
         throw new NoSuchFieldException(fieldName);
-    }
-
-    private record AppForms(String titleNorm, String titleHira, String titleKata,
-                            String titleKanaLoose, String titleLatin, String titleCho,
-                            String titleJamo, String pkgNorm) {
-    }
-
-    private record ScoredApp(Object app, int score, String normTitle, String normPkg) {
     }
 }
