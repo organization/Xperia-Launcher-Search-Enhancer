@@ -155,7 +155,7 @@ public class MainModule extends XposedModule {
                     if (!list.isEmpty()) sQueryConversions.put(q, list);
                 }
             } catch (Throwable t) {
-                module.log(Log.ERROR, TAG, "SearchConversionsHooker failed", t);
+                logError("SearchConversionsHooker failed", t);
             }
             return chain.proceed();
         }
@@ -165,6 +165,7 @@ public class MainModule extends XposedModule {
         @Override
         public Object intercept(@NonNull Chain chain) throws Throwable {
             try {
+                if (sFallbackSearchViewField == null) return chain.proceed();
                 Object thiz = chain.getThisObject();
                 String callbackQuery = TextNormalizer.normalize((String) chain.getArg(0));
                 Object editTextObj = sFallbackSearchViewField.get(thiz);
@@ -175,7 +176,7 @@ public class MainModule extends XposedModule {
                     }
                 }
             } catch (Throwable t) {
-                module.log(Log.ERROR, TAG, "StaleResultBlockerHooker failed", t);
+                logError("StaleResultBlockerHooker failed", t);
             }
             return chain.proceed();
         }
@@ -213,7 +214,7 @@ public class MainModule extends XposedModule {
 
                 sPendingQueryStore.markResolved(current, now);
             } catch (Throwable t) {
-                module.log(Log.ERROR, TAG, "ClickLearningHooker failed", t);
+                logError("ClickLearningHooker failed", t);
             }
             return chain.proceed();
         }
@@ -243,7 +244,7 @@ public class MainModule extends XposedModule {
                 }
                 return result;
             } catch (Throwable t) {
-                module.log(Log.ERROR, TAG, "SearchAlgorithmHooker failed, fallback original", t);
+                logError("SearchAlgorithmHooker failed, fallback original", t);
             }
             return chain.proceed();
         }
@@ -284,9 +285,12 @@ public class MainModule extends XposedModule {
             String pkg = getPackageName(app);
 
             // Cache AppForms by component key
-            AppForms forms = sAppFormsCache.computeIfAbsent(
-                    key != null ? key : title + "|" + pkg,
-                    k -> QueryProcessor.buildAppForms(title, pkg));
+            String cacheKey = key != null ? key : title + "|" + pkg;
+            AppForms forms = sAppFormsCache.get(cacheKey);
+            if (forms == null) {
+                forms = QueryProcessor.buildAppForms(title, pkg);
+                sAppFormsCache.put(cacheKey, forms);
+            }
 
             int best = 0;
             for (String q : queryVariants) {
@@ -322,6 +326,7 @@ public class MainModule extends XposedModule {
         sSemanticReranker.rerank(context, rawQuery, aiCandidates);
 
         int count = Math.min(dynamicResultCount(aiCandidates), aiCandidates.size());
+        if (sAsAppMethod == null) return output;
         for (int i = 0; i < count; i++) {
             output.add(sAsAppMethod.invoke(null, aiCandidates.get(i).app));
         }
@@ -331,6 +336,7 @@ public class MainModule extends XposedModule {
     // --- Dynamic result count ---
 
     private static int dynamicResultCount(List<SemanticReranker.Candidate> candidates) {
+        if (candidates == null || candidates.isEmpty()) return 0;
         if (candidates.size() <= MIN_RESULTS) return candidates.size();
 
         float topScore = candidates.get(0).finalScore;
@@ -406,6 +412,15 @@ public class MainModule extends XposedModule {
         return bonus;
     }
 
+    private static void logError(String msg, Throwable t) {
+        XposedModule m = module;
+        if (m != null) {
+            m.log(Log.ERROR, TAG, msg, t);
+        } else {
+            Log.e(TAG, msg, t);
+        }
+    }
+
     // --- Reflection accessors ---
 
     @SuppressLint("DiscouragedApi")
@@ -441,6 +456,7 @@ public class MainModule extends XposedModule {
 
     private static String getAppTitle(Object app) {
         try {
+            if (sTitleField == null) return "";
             Object o = sTitleField.get(app);
             return o == null ? "" : String.valueOf(o);
         } catch (Throwable ignore) {
@@ -450,6 +466,7 @@ public class MainModule extends XposedModule {
 
     private static String getPackageName(Object app) {
         try {
+            if (sComponentNameField == null || sGetPackageNameMethod == null) return "";
             Object cn = sComponentNameField.get(app);
             if (cn == null) return "";
             Object pkg = sGetPackageNameMethod.invoke(cn);
@@ -461,6 +478,7 @@ public class MainModule extends XposedModule {
 
     private static String appKey(Object app) {
         try {
+            if (sComponentNameField == null) return null;
             Object cn = sComponentNameField.get(app);
             return cn == null ? null : String.valueOf(cn);
         } catch (Throwable ignore) {

@@ -236,6 +236,7 @@ public final class SemanticReranker {
             }
 
             try (OrtSession.Result r = session.run(inputs)) {
+                if (r == null || r.size() == 0 || r.get(0) == null) return null;
                 Object out = r.get(0).getValue();
 
                 if (out instanceof float[][] v) {
@@ -254,14 +255,14 @@ public final class SemanticReranker {
     }
 
     private float[] meanPool(float[][] tokenEmb, long[] mask) {
-        if (tokenEmb == null || tokenEmb.length == 0) return null;
+        if (tokenEmb == null || tokenEmb.length == 0 || tokenEmb[0] == null) return null;
         int dim = tokenEmb[0].length;
         float[] sum = new float[dim];
         float count = 0f;
 
         int len = Math.min(tokenEmb.length, mask.length);
         for (int i = 0; i < len; i++) {
-            if (mask[i] == 0) continue;
+            if (mask[i] == 0 || tokenEmb[i] == null) continue;
             for (int d = 0; d < dim; d++) sum[d] += tokenEmb[i][d];
             count += 1f;
         }
@@ -283,6 +284,7 @@ public final class SemanticReranker {
     }
 
     private float cosine(float[] a, float[] b) {
+        if (a == null || b == null) return 0f;
         int n = Math.min(a.length, b.length);
         if (n == 0) return 0f;
         double d = 0d;

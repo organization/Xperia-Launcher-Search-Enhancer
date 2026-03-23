@@ -128,6 +128,10 @@ public class LearningStore {
         if (now - last < GC_INTERVAL_MS) return;
 
         Map<String, ?> all = sp.getAll();
+        if (all == null || all.isEmpty()) {
+            sp.edit().putLong(K_LAST_GC, now).apply();
+            return;
+        }
         SharedPreferences.Editor ed = sp.edit();
 
         for (String k : all.keySet()) {
