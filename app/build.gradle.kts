@@ -10,7 +10,7 @@ android {
         applicationId = namespace
         minSdk = 31
         versionCode = 1
-        versionName = "1.0.0"
+        versionName = "2.0.0"
     }
 
     lint {
@@ -42,8 +42,7 @@ android {
 }
 
 dependencies {
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.24.1")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.24.3")
     compileOnly("androidx.annotation:annotation:1.9.1")
     compileOnly("io.github.libxposed:api")
-    compileOnly(project(":libxposed-compat"))
 }
