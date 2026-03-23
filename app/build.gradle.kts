@@ -9,7 +9,7 @@ android {
     defaultConfig {
         applicationId = namespace
         minSdk = 31
-        versionCode = 1
+        versionCode = 2
         versionName = "2.0.0"
     }
 
