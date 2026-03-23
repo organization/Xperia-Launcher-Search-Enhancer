@@ -5,6 +5,7 @@ import android.text.TextUtils;
 import java.lang.reflect.Method;
 import java.text.Normalizer;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
 
 public final class KanaConverter {
 
@@ -13,10 +14,12 @@ public final class KanaConverter {
     private record TransliteratorEntry(Object instance, Method method) {}
 
     private static final ConcurrentHashMap<String, TransliteratorEntry> sIcuCache = new ConcurrentHashMap<>();
+    private static final Pattern LATIN_ASCII_STRIP = Pattern.compile("[^\\p{IsAlphabetic}\\p{IsDigit}\\s._\\-]");
+    private static final Pattern NON_AZ = Pattern.compile("[^a-z]");
 
     public static String toHiragana(String s) {
         if (TextUtils.isEmpty(s)) return "";
-        String n = Normalizer.normalize(s, Normalizer.Form.NFKC);
+        String n = TextNormalizer.isAscii(s) ? s : Normalizer.normalize(s, Normalizer.Form.NFKC);
         StringBuilder out = new StringBuilder(n.length());
         for (int i = 0; i < n.length(); i++) {
             char c = n.charAt(i);
@@ -27,7 +30,7 @@ public final class KanaConverter {
 
     public static String toKatakana(String s) {
         if (TextUtils.isEmpty(s)) return "";
-        String n = Normalizer.normalize(s, Normalizer.Form.NFKC);
+        String n = TextNormalizer.isAscii(s) ? s : Normalizer.normalize(s, Normalizer.Form.NFKC);
         StringBuilder out = new StringBuilder(n.length());
         for (int i = 0; i < n.length(); i++) {
             char c = n.charAt(i);
@@ -51,7 +54,7 @@ public final class KanaConverter {
     public static String toLatinAscii(String s) {
         String r = transliterate("Any-Latin; Latin-ASCII", s);
         if (TextUtils.isEmpty(r)) return "";
-        return r.replaceAll("[^\\p{IsAlphabetic}\\p{IsDigit}\\s._\\-]", "");
+        return LATIN_ASCII_STRIP.matcher(r).replaceAll("");
     }
 
     public static String romanToKatakana(String s) {
@@ -62,18 +65,10 @@ public final class KanaConverter {
 
     private static char expandSmallKana(char c) {
         return switch (c) {
-            case 'ァ' -> 'ア';
-            case 'ィ' -> 'イ';
-            case 'ゥ' -> 'ウ';
-            case 'ェ' -> 'エ';
-            case 'ォ' -> 'オ';
-            case 'ャ' -> 'ヤ';
-            case 'ュ' -> 'ユ';
-            case 'ョ' -> 'ヨ';
-            case 'ッ' -> 'ツ';
-            case 'ヮ' -> 'ワ';
-            case 'ヵ' -> 'カ';
-            case 'ヶ' -> 'ケ';
+            case 'ァ' -> 'ア'; case 'ィ' -> 'イ'; case 'ゥ' -> 'ウ';
+            case 'ェ' -> 'エ'; case 'ォ' -> 'オ'; case 'ャ' -> 'ヤ';
+            case 'ュ' -> 'ユ'; case 'ョ' -> 'ヨ'; case 'ッ' -> 'ツ';
+            case 'ヮ' -> 'ワ'; case 'ヵ' -> 'カ'; case 'ヶ' -> 'ケ';
             default -> c;
         };
     }
@@ -98,11 +93,11 @@ public final class KanaConverter {
         }
     }
 
-    // --- Romaji → Katakana fallback (basic table-based conversion) ---
+    // --- Romaji → Katakana fallback ---
 
     private static String romanToKatakanaBasic(String s) {
         if (TextUtils.isEmpty(s)) return "";
-        String t = TextNormalizer.normalize(s).replaceAll("[^a-z]", "");
+        String t = NON_AZ.matcher(TextNormalizer.normalize(s)).replaceAll("");
         if (TextUtils.isEmpty(t)) return "";
 
         StringBuilder out = new StringBuilder(t.length() * 2);

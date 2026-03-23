@@ -1,6 +1,8 @@
 package be.zvz.sony.launchersearchenhancer;
 
 import android.annotation.SuppressLint;
+import android.app.usage.UsageStats;
+import android.app.usage.UsageStatsManager;
 import android.content.Context;
 import android.text.TextUtils;
 import android.util.Log;
@@ -12,9 +14,11 @@ import androidx.annotation.NonNull;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 import be.zvz.sony.launchersearchenhancer.record.AppForms;
@@ -35,7 +39,9 @@ public class MainModule extends XposedModule {
 
     private static final String TAG = "LauncherSearchEnhancer";
     private static final String TARGET_PACKAGE = "com.sonymobile.launcher";
-    private static final int MAX_RESULTS = 5;
+    private static final int DEFAULT_MAX_RESULTS = 5;
+    private static final int MIN_RESULTS = 3;
+    private static final int MAX_RESULTS_CAP = 7;
 
     private static final String CLASS_DEFAULT_SEARCH_ALGO = "com.android.launcher3.allapps.search.DefaultAppSearchAlgorithm";
     private static final String CLASS_GEHIDE_APPS = "com.sonymobile.launcher.gameenhancer.GeHideAppsList";
@@ -57,11 +63,15 @@ public class MainModule extends XposedModule {
 
     // Shared state
     private static final ConcurrentHashMap<String, List<String>> sQueryConversions = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, AppForms> sAppFormsCache = new ConcurrentHashMap<>();
     private static final SemanticReranker sSemanticReranker = new SemanticReranker();
     private static final LearningStore sLearningStore = new LearningStore();
     private static final QueryHistoryStore sQueryHistoryStore = new QueryHistoryStore();
     private static final SearchSessionStore sSearchSessionStore = new SearchSessionStore();
     private static final PendingQueryStore sPendingQueryStore = new PendingQueryStore();
+
+    // UsageStats cache (populated once per package load, keyed by package name)
+    private static volatile Map<String, Integer> sUsageBonusCache;
 
     // --- Lifecycle ---
 
@@ -260,6 +270,8 @@ public class MainModule extends XposedModule {
             if (ge instanceof List<?> list) candidates.addAll(list);
         }
 
+        Map<String, Integer> usageBonus = getUsageBonus(context);
+
         ArrayList<ScoredApp> scored = new ArrayList<>(candidates.size());
         HashSet<String> dedupe = new HashSet<>();
 
@@ -268,7 +280,13 @@ public class MainModule extends XposedModule {
             String key = appKey(app);
             if (!TextUtils.isEmpty(key) && !dedupe.add(key)) continue;
 
-            AppForms forms = QueryProcessor.buildAppForms(getAppTitle(app), getPackageName(app));
+            String title = getAppTitle(app);
+            String pkg = getPackageName(app);
+
+            // Cache AppForms by component key
+            AppForms forms = sAppFormsCache.computeIfAbsent(
+                    key != null ? key : title + "|" + pkg,
+                    k -> QueryProcessor.buildAppForms(title, pkg));
 
             int best = 0;
             for (String q : queryVariants) {
@@ -280,9 +298,13 @@ public class MainModule extends XposedModule {
                 best += sLearningStore.getBonus(context, queryNorm, component);
             }
 
+            // UsageStats bonus
+            if (!TextUtils.isEmpty(pkg)) {
+                best += usageBonus.getOrDefault(pkg, 0);
+            }
+
             if (best > 0) {
-                scored.add(new ScoredApp(app, best, forms.titleNorm(), forms.pkgNorm(),
-                        getAppTitle(app), getPackageName(app)));
+                scored.add(new ScoredApp(app, best, forms.titleNorm(), forms.pkgNorm(), title, pkg));
             }
         }
 
@@ -299,11 +321,89 @@ public class MainModule extends XposedModule {
         }
         sSemanticReranker.rerank(context, rawQuery, aiCandidates);
 
-        int count = Math.min(MAX_RESULTS, aiCandidates.size());
+        int count = Math.min(dynamicResultCount(aiCandidates), aiCandidates.size());
         for (int i = 0; i < count; i++) {
             output.add(sAsAppMethod.invoke(null, aiCandidates.get(i).app));
         }
         return output;
+    }
+
+    // --- Dynamic result count ---
+
+    private static int dynamicResultCount(List<SemanticReranker.Candidate> candidates) {
+        if (candidates.size() <= MIN_RESULTS) return candidates.size();
+
+        float topScore = candidates.get(0).finalScore;
+        if (topScore <= 0f) topScore = candidates.get(0).lexicalScore;
+
+        // If top result dominates, show fewer
+        if (candidates.size() >= 2) {
+            float second = candidates.get(1).finalScore;
+            if (second <= 0f) second = candidates.get(1).lexicalScore;
+            if (topScore > 0 && second > 0 && topScore > second * 2) return MIN_RESULTS;
+        }
+
+        // If many close scores, show more
+        int closeCount = 0;
+        float threshold = topScore * 0.9f;
+        for (SemanticReranker.Candidate c : candidates) {
+            float s = c.finalScore > 0 ? c.finalScore : c.lexicalScore;
+            if (s >= threshold) closeCount++;
+        }
+        if (closeCount > DEFAULT_MAX_RESULTS) return Math.min(closeCount, MAX_RESULTS_CAP);
+
+        return DEFAULT_MAX_RESULTS;
+    }
+
+    // --- UsageStats ---
+
+    @SuppressLint("QueryPermissionsNeeded")
+    private static Map<String, Integer> getUsageBonus(Context context) {
+        Map<String, Integer> cached = sUsageBonusCache;
+        if (cached != null) return cached;
+
+        Map<String, Integer> bonus = new HashMap<>();
+        if (context == null) {
+            sUsageBonusCache = bonus;
+            return bonus;
+        }
+
+        try {
+            UsageStatsManager usm = (UsageStatsManager) context.getSystemService(Context.USAGE_STATS_SERVICE);
+            if (usm == null) {
+                sUsageBonusCache = bonus;
+                return bonus;
+            }
+
+            long now = System.currentTimeMillis();
+            long weekAgo = now - 7L * 24 * 60 * 60 * 1000L;
+            List<UsageStats> stats = usm.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, weekAgo, now);
+            if (stats == null || stats.isEmpty()) {
+                sUsageBonusCache = bonus;
+                return bonus;
+            }
+
+            long dayAgo = now - 24L * 60 * 60 * 1000L;
+            long threeDaysAgo = now - 3L * 24 * 60 * 60 * 1000L;
+
+            for (UsageStats us : stats) {
+                if (us.getTotalTimeInForeground() <= 0) continue;
+                String pkg = us.getPackageName();
+                long lastUsed = us.getLastTimeUsed();
+
+                int b;
+                if (lastUsed >= dayAgo) b = 80;
+                else if (lastUsed >= threeDaysAgo) b = 40;
+                else b = 20;
+
+                bonus.merge(pkg, b, Math::max);
+            }
+        } catch (Throwable ignored) {
+            // No PACKAGE_USAGE_STATS permission or other issue — graceful fallback
+        }
+
+        sUsageBonusCache = bonus;
+        return bonus;
     }
 
     // --- Reflection accessors ---

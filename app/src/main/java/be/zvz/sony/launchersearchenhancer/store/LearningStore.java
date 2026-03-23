@@ -12,45 +12,56 @@ public class LearningStore {
     private static final String K_CNT = "n:";
     private static final String K_TS = "t:";
 
-    private static final long SOFT_EXPIRE_MS = 14L * 24L * 60L * 60L * 1000L;
-    private static final long HARD_EXPIRE_MS = 30L * 24L * 60L * 60L * 1000L;
-    private static final long GC_INTERVAL_MS = 24L * 60L * 60L * 1000L;
+    private static final long DAY_MS = 24L * 60L * 60L * 1000L;
+    private static final long HARD_EXPIRE_MS = 30L * DAY_MS;
+    private static final long GC_INTERVAL_MS = DAY_MS;
     private static final String K_LAST_GC = "__last_gc";
 
-    public void observe(Context c, String queryNorm, String component) {
+    private volatile SharedPreferences cachedPrefs;
+
+    private SharedPreferences prefs(Context c) {
+        SharedPreferences sp = cachedPrefs;
+        if (sp != null) return sp;
+        sp = c.getSharedPreferences(PREF, Context.MODE_PRIVATE);
+        cachedPrefs = sp;
+        return sp;
+    }
+
+    public synchronized void observe(Context c, String queryNorm, String component) {
         if (c == null || TextUtils.isEmpty(queryNorm) || TextUtils.isEmpty(component)) return;
         if (queryNorm.length() < 2) return;
 
         long now = System.currentTimeMillis();
         maybeGc(c, now);
-        pruneOne(c, queryNorm, now);
 
-        SharedPreferences sp = c.getSharedPreferences(PREF, Context.MODE_PRIVATE);
+        SharedPreferences sp = prefs(c);
         String compKey = K_COMP + queryNorm;
         String cntKey = K_CNT + queryNorm;
         String tsKey = K_TS + queryNorm;
 
+        // Prune if hard-expired
+        long ts = sp.getLong(tsKey, 0L);
+        if (ts > 0 && now - ts >= HARD_EXPIRE_MS) {
+            removeMapping(sp, queryNorm);
+        }
+
         String prevComp = sp.getString(compKey, "");
         int cnt = sp.getInt(cntKey, 0);
 
-        if (component.equals(prevComp)) {
-            cnt = Math.min(cnt + 1, 20);
-        } else {
-            cnt = 1;
-        }
+        cnt = component.equals(prevComp) ? Math.min(cnt + 1, 20) : 1;
 
         sp.edit()
                 .putString(compKey, component)
                 .putInt(cntKey, cnt)
                 .putLong(tsKey, now)
-                .apply();
+                .commit();
     }
 
-    public void observeWeakBridge(Context c, String queryNorm, String component) {
+    public synchronized void observeWeakBridge(Context c, String queryNorm, String component) {
         if (c == null || TextUtils.isEmpty(queryNorm) || TextUtils.isEmpty(component)) return;
         if (queryNorm.length() < 2) return;
 
-        SharedPreferences sp = c.getSharedPreferences(PREF, Context.MODE_PRIVATE);
+        SharedPreferences sp = prefs(c);
         String compKey = K_COMP + queryNorm;
         String cntKey = K_CNT + queryNorm;
         String tsKey = K_TS + queryNorm;
@@ -58,27 +69,23 @@ public class LearningStore {
         String prevComp = sp.getString(compKey, "");
         int cnt = sp.getInt(cntKey, 0);
 
-        if (component.equals(prevComp)) {
-            cnt = Math.min(cnt + 1, 6);
-        } else {
-            cnt = 1;
-        }
+        cnt = component.equals(prevComp) ? Math.min(cnt + 1, 6) : 1;
 
         sp.edit()
                 .putString(compKey, component)
                 .putInt(cntKey, cnt)
                 .putLong(tsKey, System.currentTimeMillis())
-                .apply();
+                .commit();
     }
 
-    public int getBonus(Context c, String queryNorm, String component) {
+    public synchronized int getBonus(Context c, String queryNorm, String component) {
         if (c == null || TextUtils.isEmpty(queryNorm) || TextUtils.isEmpty(component)) return 0;
         if (queryNorm.length() < 2) return 0;
 
         long now = System.currentTimeMillis();
         maybeGc(c, now);
 
-        SharedPreferences sp = c.getSharedPreferences(PREF, Context.MODE_PRIVATE);
+        SharedPreferences sp = prefs(c);
         String comp = sp.getString(K_COMP + queryNorm, "");
         if (!component.equals(comp)) return 0;
 
@@ -87,24 +94,24 @@ public class LearningStore {
         if (ts <= 0L) return 0;
 
         long age = now - ts;
-
         if (age >= HARD_EXPIRE_MS) {
             removeMapping(sp, queryNorm);
             return 0;
         }
 
+        // Frecency: base score from count, multiplied by recency factor
         int base = Math.min(110 + cnt * 12, 240);
+        float recency = recencyMultiplier(age);
+        return Math.max((int) (base * recency), 0);
+    }
 
-        if (age > SOFT_EXPIRE_MS) {
-            long decayAge = age - SOFT_EXPIRE_MS;
-            long steps = decayAge / (7L * 24L * 60L * 60L * 1000L);
-            for (long i = 0; i <= steps; i++) {
-                base /= 2;
-                if (base <= 0) return 0;
-            }
-        }
-
-        return Math.max(base, 0);
+    private static float recencyMultiplier(long ageMs) {
+        if (ageMs < DAY_MS) return 1.0f;
+        if (ageMs < 3 * DAY_MS) return 0.8f;
+        if (ageMs < 7 * DAY_MS) return 0.6f;
+        if (ageMs < 14 * DAY_MS) return 0.4f;
+        if (ageMs < 30 * DAY_MS) return 0.2f;
+        return 0f;
     }
 
     private void removeMapping(SharedPreferences sp, String queryNorm) {
@@ -115,18 +122,8 @@ public class LearningStore {
                 .apply();
     }
 
-    private void pruneOne(Context c, String queryNorm, long now) {
-        if (TextUtils.isEmpty(queryNorm)) return;
-        SharedPreferences sp = c.getSharedPreferences(PREF, Context.MODE_PRIVATE);
-        long ts = sp.getLong(K_TS + queryNorm, 0L);
-        if (ts <= 0L) return;
-        if (now - ts >= HARD_EXPIRE_MS) {
-            removeMapping(sp, queryNorm);
-        }
-    }
-
     private void maybeGc(Context c, long now) {
-        SharedPreferences sp = c.getSharedPreferences(PREF, Context.MODE_PRIVATE);
+        SharedPreferences sp = prefs(c);
         long last = sp.getLong(K_LAST_GC, 0L);
         if (now - last < GC_INTERVAL_MS) return;
 
@@ -136,15 +133,11 @@ public class LearningStore {
         for (String k : all.keySet()) {
             if (!k.startsWith(K_TS)) continue;
             Object v = all.get(k);
-            if (!(v instanceof Long)) continue;
-
-            long ts = (Long) v;
+            if (!(v instanceof Long ts)) continue;
             if (now - ts < HARD_EXPIRE_MS) continue;
 
             String q = k.substring(K_TS.length());
-            ed.remove(K_COMP + q);
-            ed.remove(K_CNT + q);
-            ed.remove(K_TS + q);
+            ed.remove(K_COMP + q).remove(K_CNT + q).remove(K_TS + q);
         }
 
         ed.putLong(K_LAST_GC, now).apply();

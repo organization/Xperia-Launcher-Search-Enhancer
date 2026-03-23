@@ -3,6 +3,7 @@ package be.zvz.sony.launchersearchenhancer.reranker;
 import android.content.Context;
 import android.os.Build;
 import android.text.TextUtils;
+import android.util.Log;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -22,7 +23,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 import ai.onnxruntime.OnnxTensor;
 import ai.onnxruntime.OrtEnvironment;
@@ -30,6 +30,7 @@ import ai.onnxruntime.OrtSession;
 
 public final class SemanticReranker {
 
+    private static final String TAG = "SemanticReranker";
     private static final String CACHE_VERSION = "v2";
     private static final String MODULE_PACKAGE = "be.zvz.sony.launchersearchenhancer";
 
@@ -43,7 +44,16 @@ public final class SemanticReranker {
     private static final int RERANK_TOP_N = 32;
     private static final int EMBED_CACHE_MAX = 1024;
 
-    private final ConcurrentHashMap<String, float[]> embedCache = new ConcurrentHashMap<>();
+    // LRU cache with synchronized access
+    @SuppressWarnings("serial")
+    private final Map<String, float[]> embedCache = Collections.synchronizedMap(
+            new LinkedHashMap<String, float[]>(256, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, float[]> eldest) {
+                    return size() > EMBED_CACHE_MAX;
+                }
+            }
+    );
 
     private volatile OrtEnvironment env;
     private volatile OrtSession session;
@@ -108,7 +118,8 @@ public final class SemanticReranker {
             candidates.clear();
             candidates.addAll(head);
             candidates.addAll(tail);
-        } catch (Throwable ignored) {
+        } catch (Throwable t) {
+            Log.w(TAG, "rerank failed", t);
         }
     }
 
@@ -125,14 +136,11 @@ public final class SemanticReranker {
     }
 
     private float[] embedCached(String key, String text) throws Exception {
-        float[] c = embedCache.get(key);
-        if (c != null) return c;
+        float[] cached = embedCache.get(key);
+        if (cached != null) return cached;
 
         float[] v = embed(text);
         if (v != null) {
-            if (embedCache.size() > EMBED_CACHE_MAX) {
-                embedCache.clear();
-            }
             embedCache.put(key, v);
         }
         return v;
@@ -212,9 +220,9 @@ public final class SemanticReranker {
 
         JsonTokenizer.Encoded e = tokenizer.encode(text, MAX_SEQ_LEN);
 
-        long[][] inputIds = new long[][]{e.inputIds};
-        long[][] attentionMask = new long[][]{e.attentionMask};
-        long[][] tokenTypeIds = new long[][]{new long[MAX_SEQ_LEN]};
+        long[][] inputIds = {e.inputIds};
+        long[][] attentionMask = {e.attentionMask};
+        long[][] tokenTypeIds = {new long[MAX_SEQ_LEN]};
 
         Map<String, OnnxTensor> inputs = new LinkedHashMap<>();
         try (OnnxTensor tIds = OnnxTensor.createTensor(env, inputIds);
@@ -236,7 +244,8 @@ public final class SemanticReranker {
                 }
 
                 if (out instanceof float[][][] tokenEmb) {
-                    return l2norm(meanPool(tokenEmb[0], e.attentionMask));
+                    float[] pooled = meanPool(tokenEmb[0], e.attentionMask);
+                    return pooled == null ? null : l2norm(pooled);
                 }
             }
         }
@@ -257,7 +266,7 @@ public final class SemanticReranker {
             count += 1f;
         }
 
-        if (count <= 0f) return sum;
+        if (count <= 0f) return null;
         for (int d = 0; d < dim; d++) sum[d] /= count;
         return sum;
     }
@@ -288,10 +297,10 @@ public final class SemanticReranker {
 
     private String normalize(String s) {
         if (s == null) return "";
-        return Normalizer.normalize(s, Normalizer.Form.NFKC)
-                .toLowerCase(Locale.ROOT)
-                .trim();
+        return Normalizer.normalize(s, Normalizer.Form.NFKC).toLowerCase(Locale.ROOT).trim();
     }
+
+    // --- Tokenizer ---
 
     private static final class JsonTokenizer {
 
@@ -402,15 +411,13 @@ public final class SemanticReranker {
             }
         }
 
-        record Encoded(long[] inputIds, long[] attentionMask) {
-        }
+        record Encoded(long[] inputIds, long[] attentionMask) {}
+
+        // --- WordPiece ---
 
         private static final class WordPieceImpl implements Impl {
             private final Map<String, Integer> vocab;
-            private final int clsId;
-            private final int sepId;
-            private final int unkId;
-            private final int padId;
+            private final int clsId, sepId, unkId, padId;
             private final boolean lowercase;
             private final int maxInputCharsPerWord;
 
@@ -464,14 +471,12 @@ public final class SemanticReranker {
                     char c = s.charAt(i);
                     if (Character.isWhitespace(c)) {
                         flush(cur, out);
-                        continue;
-                    }
-                    if (isDelimiter(c)) {
+                    } else if (isDelimiter(c)) {
                         flush(cur, out);
                         out.add(String.valueOf(c));
-                        continue;
+                    } else {
+                        cur.append(c);
                     }
-                    cur.append(c);
                 }
                 flush(cur, out);
                 return out;
@@ -530,15 +535,14 @@ public final class SemanticReranker {
             }
         }
 
+        // --- Unigram ---
+
         private static final class UnigramImpl implements Impl {
             private static final char SPIECE_WS = '\u2581';
 
             private final Map<String, Integer> pieceToId;
             private final Map<String, Float> pieceScore;
-            private final int clsId;
-            private final int sepId;
-            private final int unkId;
-            private final int padId;
+            private final int clsId, sepId, unkId, padId;
             private final boolean lowercase;
             private final int maxPieceLen;
 
