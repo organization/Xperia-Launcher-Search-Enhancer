@@ -44,5 +44,5 @@ android {
 dependencies {
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.24.3")
     compileOnly("androidx.annotation:annotation:1.9.1")
-    compileOnly("io.github.libxposed:api")
+    compileOnly(project(":libxposed-compat"))
 }

@@ -590,7 +590,7 @@ public final class AutoFolderController {
 
     private static void log(XposedModule module, String message, Throwable t) {
         if (module != null) {
-            module.log(Log.ERROR, TAG, message, t);
+            module.log(TAG + ": " + message, t);
         } else {
             Log.e(TAG, message, t);
         }

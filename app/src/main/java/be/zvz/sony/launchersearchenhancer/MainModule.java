@@ -33,7 +33,11 @@ import be.zvz.sony.launchersearchenhancer.store.QueryHistoryStore;
 import be.zvz.sony.launchersearchenhancer.store.SearchSessionStore;
 import be.zvz.sony.launchersearchenhancer.text.TextNormalizer;
 import be.zvz.sony.launchersearchenhancer.util.ReflectionUtils;
+import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModule;
+import io.github.libxposed.api.annotations.AfterInvocation;
+import io.github.libxposed.api.annotations.BeforeInvocation;
+import io.github.libxposed.api.annotations.XposedHooker;
 
 @SuppressLint({"PrivateApi", "BlockedPrivateApi"})
 public class MainModule extends XposedModule {
@@ -78,14 +82,15 @@ public class MainModule extends XposedModule {
 
     // --- Lifecycle ---
 
-    @Override
-    public void onModuleLoaded(@NonNull ModuleLoadedParam param) {
+    public MainModule(XposedInterface base, ModuleLoadedParam param) {
+        super(base, param);
         module = this;
-        log(Log.INFO, TAG, "Init module");
+        logInfo("Init module");
     }
 
     @Override
-    public void onPackageReady(@NonNull PackageReadyParam param) {
+    public void onPackageLoaded(@NonNull PackageLoadedParam param) {
+        super.onPackageLoaded(param);
         if (!TARGET_PACKAGE.equals(param.getPackageName())) return;
 
         try {
@@ -94,13 +99,13 @@ public class MainModule extends XposedModule {
             Class<?> searchAlgoClass = cl.loadClass(CLASS_DEFAULT_SEARCH_ALGO);
             Method getTitleMatchResult = ReflectionUtils.findMethod(searchAlgoClass,
                     "getTitleMatchResult", Context.class, List.class, String.class);
-            hook(getTitleMatchResult).intercept(new SearchAlgorithmHooker());
+            hook(getTitleMatchResult, SearchAlgorithmHooker.class);
 
             try {
                 Class<?> searchCallbackClass = cl.loadClass("com.android.launcher3.search.SearchCallback");
                 Method doSearch = ReflectionUtils.findMethod(searchAlgoClass,
                         "doSearch", String.class, String[].class, searchCallbackClass);
-                hook(doSearch).intercept(new SearchConversionsHooker());
+                hook(doSearch, SearchConversionsHooker.class);
             } catch (Throwable ignored) {
             }
 
@@ -119,8 +124,8 @@ public class MainModule extends XposedModule {
 
             Class<?> hotseatClass = cl.loadClass(CLASS_HOTSEAT_QSB);
             sFallbackSearchViewField = ReflectionUtils.findField(hotseatClass, "mFallbackSearchView");
-            hook(ReflectionUtils.findMethod(hotseatClass, "onSearchResult", String.class, ArrayList.class))
-                    .intercept(new StaleResultBlockerHooker());
+            hook(ReflectionUtils.findMethod(hotseatClass, "onSearchResult", String.class, ArrayList.class),
+                    StaleResultBlockerHooker.class);
 
             try {
                 sGetTargetComponentMethod = ReflectionUtils.findMethod(
@@ -129,34 +134,35 @@ public class MainModule extends XposedModule {
             }
 
             try {
-                hook(ReflectionUtils.findMethod(cl.loadClass(CLASS_ITEM_CLICK_HANDLER), "onClick", View.class))
-                        .intercept(new ClickLearningHooker());
+                hook(ReflectionUtils.findMethod(cl.loadClass(CLASS_ITEM_CLICK_HANDLER), "onClick", View.class),
+                        ClickLearningHooker.class);
             } catch (Throwable t) {
-                log(Log.ERROR, TAG, "Click learning hook registration failed", t);
+                logError("Click learning hook registration failed", t);
             }
 
             try {
                 hook(ReflectionUtils.findMethod(
-                                cl.loadClass(CLASS_ACTIVITY_ALL_APPS), "setupSortAppsPopupMenu"))
-                        .intercept(new AllAppsMenuHooker());
+                                cl.loadClass(CLASS_ACTIVITY_ALL_APPS), "setupSortAppsPopupMenu"),
+                        AllAppsMenuHooker.class);
             } catch (Throwable t) {
-                log(Log.ERROR, TAG, "All apps menu hook registration failed", t);
+                logError("All apps menu hook registration failed", t);
             }
 
-            log(Log.INFO, TAG, "Search enhancement hooks registered successfully.");
+            logInfo("Search enhancement hooks registered successfully.");
         } catch (Throwable t) {
-            log(Log.ERROR, TAG, "Failed to register hooks", t);
+            logError("Failed to register hooks", t);
         }
     }
 
     // --- Hookers ---
 
+    @XposedHooker
     private static class SearchConversionsHooker implements Hooker {
-        @Override
-        public Object intercept(@NonNull Chain chain) throws Throwable {
+        @BeforeInvocation
+        public static void before(@NonNull BeforeHookCallback callback) {
             try {
-                String q = TextNormalizer.normalize((String) chain.getArg(0));
-                String[] conversions = (String[]) chain.getArg(1);
+                String q = TextNormalizer.normalize((String) callback.getArgs()[0]);
+                String[] conversions = (String[]) callback.getArgs()[1];
                 if (!TextUtils.isEmpty(q) && conversions != null && conversions.length > 0) {
                     ArrayList<String> list = new ArrayList<>(conversions.length);
                     for (String c : conversions) {
@@ -168,58 +174,57 @@ public class MainModule extends XposedModule {
             } catch (Throwable t) {
                 logError("SearchConversionsHooker failed", t);
             }
-            return chain.proceed();
         }
     }
 
+    @XposedHooker
     private static class AllAppsMenuHooker implements Hooker {
-        @Override
-        public Object intercept(@NonNull Chain chain) throws Throwable {
-            Object result = chain.proceed();
+        @AfterInvocation
+        public static void after(@NonNull AfterHookCallback callback) {
             try {
-                sAutoFolderController.install(chain.getThisObject(), module);
+                sAutoFolderController.install(callback.getThisObject(), module);
             } catch (Throwable t) {
                 logError("AllAppsMenuHooker failed", t);
             }
-            return result;
         }
     }
 
+    @XposedHooker
     private static class StaleResultBlockerHooker implements Hooker {
-        @Override
-        public Object intercept(@NonNull Chain chain) throws Throwable {
+        @BeforeInvocation
+        public static void before(@NonNull BeforeHookCallback callback) {
             try {
-                if (sFallbackSearchViewField == null) return chain.proceed();
-                Object thiz = chain.getThisObject();
-                String callbackQuery = TextNormalizer.normalize((String) chain.getArg(0));
+                if (sFallbackSearchViewField == null) return;
+                Object thiz = callback.getThisObject();
+                String callbackQuery = TextNormalizer.normalize((String) callback.getArgs()[0]);
                 Object editTextObj = sFallbackSearchViewField.get(thiz);
                 if (editTextObj instanceof TextView tv) {
                     String current = TextNormalizer.normalize(String.valueOf(tv.getText()));
                     if (!TextUtils.isEmpty(current) && !current.equals(callbackQuery)) {
-                        return null;
+                        callback.returnAndSkip(null);
                     }
                 }
             } catch (Throwable t) {
                 logError("StaleResultBlockerHooker failed", t);
             }
-            return chain.proceed();
         }
     }
 
+    @XposedHooker
     private static class ClickLearningHooker implements Hooker {
-        @Override
-        public Object intercept(@NonNull Chain chain) throws Throwable {
+        @BeforeInvocation
+        public static void before(@NonNull BeforeHookCallback callback) {
             try {
-                View clicked = (View) chain.getArg(0);
-                if (clicked == null) return chain.proceed();
+                View clicked = (View) callback.getArgs()[0];
+                if (clicked == null) return;
                 Object tag = clicked.getTag();
-                if (tag == null) return chain.proceed();
+                if (tag == null) return;
 
                 String component = getComponentFromItem(tag);
-                if (TextUtils.isEmpty(component)) return chain.proceed();
+                if (TextUtils.isEmpty(component)) return;
 
                 String query = extractCurrentQueryFromRoot(clicked);
-                if (TextUtils.isEmpty(query)) return chain.proceed();
+                if (TextUtils.isEmpty(query)) return;
 
                 String current = TextNormalizer.normalize(query);
                 long now = System.currentTimeMillis();
@@ -240,17 +245,17 @@ public class MainModule extends XposedModule {
             } catch (Throwable t) {
                 logError("ClickLearningHooker failed", t);
             }
-            return chain.proceed();
         }
     }
 
+    @XposedHooker
     private static class SearchAlgorithmHooker implements Hooker {
-        @Override
-        public Object intercept(@NonNull Chain chain) throws Throwable {
+        @BeforeInvocation
+        public static void before(@NonNull BeforeHookCallback callback) {
             try {
-                Context context = (Context) chain.getArg(0);
-                List<?> originalApps = (List<?>) chain.getArg(1);
-                String rawQuery = (String) chain.getArg(2);
+                Context context = (Context) callback.getArgs()[0];
+                List<?> originalApps = (List<?>) callback.getArgs()[1];
+                String rawQuery = (String) callback.getArgs()[2];
                 String qNorm = TextNormalizer.normalize(rawQuery);
                 long now = System.currentTimeMillis();
 
@@ -266,11 +271,10 @@ public class MainModule extends XposedModule {
                 if (!TextUtils.isEmpty(qNorm) && result.isEmpty()) {
                     sPendingQueryStore.recordNoResult(qNorm, now, sSearchSessionStore.getSessionId());
                 }
-                return result;
+                callback.returnAndSkip(result);
             } catch (Throwable t) {
                 logError("SearchAlgorithmHooker failed, fallback original", t);
             }
-            return chain.proceed();
         }
     }
 
@@ -439,9 +443,18 @@ public class MainModule extends XposedModule {
     private static void logError(String msg, Throwable t) {
         XposedModule m = module;
         if (m != null) {
-            m.log(Log.ERROR, TAG, msg, t);
+            m.log(TAG + ": " + msg, t);
         } else {
             Log.e(TAG, msg, t);
+        }
+    }
+
+    private static void logInfo(String msg) {
+        XposedModule m = module;
+        if (m != null) {
+            m.log(TAG + ": " + msg);
+        } else {
+            Log.i(TAG, msg);
         }
     }
 

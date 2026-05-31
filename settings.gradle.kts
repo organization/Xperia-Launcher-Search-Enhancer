@@ -18,4 +18,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "XposedModuleTemplate"
 include(":app")
-includeBuild("libxposed-api")
+include(":libxposed-compat")
