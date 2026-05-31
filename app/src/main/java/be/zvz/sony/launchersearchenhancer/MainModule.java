@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+import be.zvz.sony.launchersearchenhancer.autofolder.AutoFolderController;
 import be.zvz.sony.launchersearchenhancer.record.AppForms;
 import be.zvz.sony.launchersearchenhancer.record.ScoredApp;
 import be.zvz.sony.launchersearchenhancer.reranker.SemanticReranker;
@@ -49,6 +50,7 @@ public class MainModule extends XposedModule {
     private static final String CLASS_ADAPTER_ITEM = "com.android.launcher3.allapps.BaseAllAppsAdapter$AdapterItem";
     private static final String CLASS_HOTSEAT_QSB = "com.android.searchlauncher.HotseatQsbWidget";
     private static final String CLASS_ITEM_CLICK_HANDLER = "com.android.launcher3.touch.ItemClickHandler";
+    private static final String CLASS_ACTIVITY_ALL_APPS = "com.android.launcher3.allapps.ActivityAllAppsContainerView";
 
     private static XposedModule module;
 
@@ -65,6 +67,7 @@ public class MainModule extends XposedModule {
     private static final ConcurrentHashMap<String, List<String>> sQueryConversions = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<String, AppForms> sAppFormsCache = new ConcurrentHashMap<>();
     private static final SemanticReranker sSemanticReranker = new SemanticReranker();
+    private static final AutoFolderController sAutoFolderController = new AutoFolderController(sSemanticReranker);
     private static final LearningStore sLearningStore = new LearningStore();
     private static final QueryHistoryStore sQueryHistoryStore = new QueryHistoryStore();
     private static final SearchSessionStore sSearchSessionStore = new SearchSessionStore();
@@ -132,6 +135,14 @@ public class MainModule extends XposedModule {
                 log(Log.ERROR, TAG, "Click learning hook registration failed", t);
             }
 
+            try {
+                hook(ReflectionUtils.findMethod(
+                                cl.loadClass(CLASS_ACTIVITY_ALL_APPS), "setupSortAppsPopupMenu"))
+                        .intercept(new AllAppsMenuHooker());
+            } catch (Throwable t) {
+                log(Log.ERROR, TAG, "All apps menu hook registration failed", t);
+            }
+
             log(Log.INFO, TAG, "Search enhancement hooks registered successfully.");
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "Failed to register hooks", t);
@@ -158,6 +169,19 @@ public class MainModule extends XposedModule {
                 logError("SearchConversionsHooker failed", t);
             }
             return chain.proceed();
+        }
+    }
+
+    private static class AllAppsMenuHooker implements Hooker {
+        @Override
+        public Object intercept(@NonNull Chain chain) throws Throwable {
+            Object result = chain.proceed();
+            try {
+                sAutoFolderController.install(chain.getThisObject(), module);
+            } catch (Throwable t) {
+                logError("AllAppsMenuHooker failed", t);
+            }
+            return result;
         }
     }
 

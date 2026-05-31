@@ -1,4 +1,39 @@
 <resources>
     <string name="app_name">Xperia Launcher Search Enhancer</string>
     <string name="xposed_description">Enhance search algorithm for Xperia Launcher</string>
+
+    <string name="auto_folder_menu_title">AI Auto Folder</string>
+    <string name="auto_folder_action_failed">Could not run that action.</string>
+    <string name="auto_folder_already_running">Auto foldering is already running.</string>
+    <string name="auto_folder_read_failed">Could not read the app list.</string>
+    <string name="auto_folder_not_enough_apps">There are not enough loose apps to folder.</string>
+    <string name="auto_folder_launcher_unavailable">Could not find the Launcher screen.</string>
+    <string name="auto_folder_confirm_message">%1$d loose apps will be analyzed locally and grouped with similar apps.\n\nExisting folders and their contents will be kept unchanged.</string>
+    <string name="auto_folder_confirm_positive">Run</string>
+    <string name="auto_folder_analyzing">AI is analyzing your apps...</string>
+    <string name="auto_folder_analysis_failed">AI analysis could not be completed.</string>
+    <string name="auto_folder_no_new_folders">No new folders can be created.</string>
+    <string name="auto_folder_save_failed">Could not save the auto folders.</string>
+
+    <plurals name="auto_folder_result">
+        <item quantity="one">%1$d folder organized %2$d apps.</item>
+        <item quantity="other">%1$d folders organized %2$d apps.</item>
+    </plurals>
+
+    <string name="auto_folder_category_messaging">Messaging</string>
+    <string name="auto_folder_category_music">Music</string>
+    <string name="auto_folder_category_video">Video</string>
+    <string name="auto_folder_category_photo">Photos</string>
+    <string name="auto_folder_category_games">Games</string>
+    <string name="auto_folder_category_shopping">Shopping</string>
+    <string name="auto_folder_category_finance">Finance</string>
+    <string name="auto_folder_category_productivity">Productivity</string>
+    <string name="auto_folder_category_tools">Tools</string>
+    <string name="auto_folder_category_browser">Browser</string>
+    <string name="auto_folder_category_maps">Maps</string>
+    <string name="auto_folder_category_travel">Travel</string>
+    <string name="auto_folder_category_food">Food</string>
+    <string name="auto_folder_category_health">Health</string>
+    <string name="auto_folder_category_education">Education</string>
+    <string name="auto_folder_category_news">News</string>
 </resources>

@@ -100,7 +100,7 @@ public final class SemanticReranker {
             for (Candidate c : head) {
                 String appText = buildAppText(c.title, c.packageName);
                 float[] aVec = embedCached("a|" + normalize(appText), appText);
-                c.semanticScore = aVec == null ? 0f : cosine(qVec, aVec);
+                c.semanticScore = aVec == null ? 0f : cosineSimilarity(qVec, aVec);
 
                 float lexicalNorm = clamp01(c.lexicalScore / 1300f);
                 float semanticNorm = clamp01((c.semanticScore + 1f) * 0.5f);
@@ -121,6 +121,21 @@ public final class SemanticReranker {
         } catch (Throwable t) {
             Log.w(TAG, "rerank failed", t);
         }
+    }
+
+    public float[] embedForText(Context context, String text) throws Exception {
+        if (context == null || TextUtils.isEmpty(text)) return null;
+        ensureReady(context);
+        return embedCached("u|" + normalize(text), text);
+    }
+
+    public static float cosineSimilarity(float[] a, float[] b) {
+        if (a == null || b == null) return 0f;
+        int n = Math.min(a.length, b.length);
+        if (n == 0) return 0f;
+        double d = 0d;
+        for (int i = 0; i < n; i++) d += a[i] * b[i];
+        return (float) d;
     }
 
     private float semanticWeight(String q) {
@@ -281,15 +296,6 @@ public final class SemanticReranker {
         float[] out = new float[v.length];
         for (int i = 0; i < v.length; i++) out[i] = v[i] * inv;
         return out;
-    }
-
-    private float cosine(float[] a, float[] b) {
-        if (a == null || b == null) return 0f;
-        int n = Math.min(a.length, b.length);
-        if (n == 0) return 0f;
-        double d = 0d;
-        for (int i = 0; i < n; i++) d += a[i] * b[i];
-        return (float) d;
     }
 
     private float clamp01(float v) {
