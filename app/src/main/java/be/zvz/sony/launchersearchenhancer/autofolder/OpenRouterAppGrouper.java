@@ -50,22 +50,25 @@ public final class OpenRouterAppGrouper {
             return Collections.emptyList();
         }
 
-        JSONObject requestBody = buildRequest(apps, config, true);
-        String responseBody;
+        String responseBody = requestWithJsonModeFallback(
+                context,
+                config.apiKey,
+                buildGroupingRequest(apps, config, true),
+                buildGroupingRequest(apps, config, false));
+        String content = completionContent(responseBody);
         try {
-            responseBody = requestCompletion(context, config.apiKey, requestBody.toString());
-        } catch (IOException e) {
-            if (!isResponseFormatFailure(e)) throw e;
-            responseBody = requestCompletion(
+            return parseGroups(content, apps);
+        } catch (IOException | JSONException parseError) {
+            String repairedResponse = requestWithJsonModeFallback(
                     context,
                     config.apiKey,
-                    buildRequest(apps, config, false).toString());
+                    buildRepairRequest(config, content, parseError, true),
+                    buildRepairRequest(config, content, parseError, false));
+            return parseGroups(completionContent(repairedResponse), apps);
         }
-        String content = completionContent(responseBody);
-        return parseGroups(content, apps);
     }
 
-    private JSONObject buildRequest(
+    private JSONObject buildGroupingRequest(
             List<AppCandidate> apps,
             Config config,
             boolean requestJsonMode
@@ -117,13 +120,67 @@ public final class OpenRouterAppGrouper {
 
     private static String systemPrompt() {
         return "You organize Android launcher app tray items into folders. "
-                + "Return only valid JSON with this exact shape: "
+                + "CRITICAL OUTPUT CONTRACT, especially for Claude and Gemini models: "
+                + "your entire reply must be exactly one valid JSON object. "
+                + "Do not write Markdown, code fences, commentary, apologies, reasoning, or trailing text. "
+                + "Start with { and end with }. "
+                + "Use this exact schema and no other top-level keys: "
                 + "{\"folders\":[{\"label\":\"short folder label\",\"ids\":[0,1]}]}. "
+                + "If no folders should be created, return {\"folders\":[]}. "
                 + "Use only ids from the provided app list. Never duplicate an id. "
                 + "Create folders only when at least 2 apps clearly belong together. "
                 + "Leave uncertain apps and singleton categories out. "
                 + "Keep labels short and suitable for a phone launcher. "
-                + "Existing user folders are already omitted from the app list and must remain unchanged.";
+                + "Existing user folders are already omitted from the app list and must remain unchanged. "
+                + "Example valid output: {\"folders\":[{\"label\":\"Messaging\",\"ids\":[0,4,9]}]}.";
+    }
+
+    private JSONObject buildRepairRequest(
+            Config config,
+            String invalidContent,
+            Throwable parseError,
+            boolean requestJsonMode
+    ) throws JSONException {
+        String repairPrompt = "The previous model response was not usable launcher-folder JSON. "
+                + "Convert it into one valid JSON object with exactly this schema:\n"
+                + "{\"folders\":[{\"label\":\"short folder label\",\"ids\":[0,1]}]}\n"
+                + "Rules:\n"
+                + "- Return only JSON. No Markdown, no code fences, no explanation.\n"
+                + "- Keep only folders that have at least two integer ids.\n"
+                + "- If nothing valid can be recovered, return {\"folders\":[]}.\n\n"
+                + "Parse error:\n"
+                + (parseError == null ? "unknown" : String.valueOf(parseError.getMessage()))
+                + "\n\nPrevious response:\n"
+                + trimRepairContent(invalidContent);
+
+        JSONArray messages = new JSONArray()
+                .put(message("system", "You repair malformed model output into strict JSON. "
+                        + "Your entire reply must be one JSON object and nothing else."))
+                .put(message("user", repairPrompt));
+
+        JSONObject request = new JSONObject()
+                .put("model", config.model)
+                .put("messages", messages)
+                .put("temperature", 0)
+                .put("max_tokens", 1200);
+        if (requestJsonMode) {
+            request.put("response_format", new JSONObject().put("type", "json_object"));
+        }
+        return request;
+    }
+
+    private String requestWithJsonModeFallback(
+            Context context,
+            String apiKey,
+            JSONObject jsonModeRequest,
+            JSONObject plainRequest
+    ) throws Exception {
+        try {
+            return requestCompletion(context, apiKey, jsonModeRequest.toString());
+        } catch (IOException e) {
+            if (!isResponseFormatFailure(e)) throw e;
+            return requestCompletion(context, apiKey, plainRequest.toString());
+        }
     }
 
     private String requestCompletion(Context context, String apiKey, String requestBody)
@@ -229,7 +286,7 @@ public final class OpenRouterAppGrouper {
     private static List<Group> parseGroups(String content, List<AppCandidate> apps)
             throws JSONException, IOException {
         JSONObject grouped = parseJsonObject(content);
-        JSONArray folders = grouped.optJSONArray("folders");
+        JSONArray folders = optArray(grouped, "folders", "groups");
         if (folders == null) return Collections.emptyList();
 
         Map<Integer, AppCandidate> appById = new HashMap<>();
@@ -243,13 +300,14 @@ public final class OpenRouterAppGrouper {
             JSONObject folder = folders.optJSONObject(i);
             if (folder == null) continue;
 
-            String label = cleanLabel(folder.optString("label", "AI"));
-            JSONArray ids = folder.optJSONArray("ids");
+            String label = cleanLabel(optString(folder,
+                    "label", "name", "folder", "folderName", "title"));
+            JSONArray ids = optArray(folder, "ids", "appIds", "app_ids", "apps", "items");
             if (ids == null) continue;
 
             ArrayList<AppCandidate> groupedApps = new ArrayList<>();
             for (int j = 0; j < ids.length(); j++) {
-                AppCandidate app = appById.get(ids.optInt(j, -1));
+                AppCandidate app = appById.get(idAt(ids, j));
                 if (app == null || claimedKeys.contains(app.key)) continue;
                 groupedApps.add(app);
                 claimedKeys.add(app.key);
@@ -273,13 +331,84 @@ public final class OpenRouterAppGrouper {
         try {
             return new JSONObject(trimmed);
         } catch (JSONException ignored) {
-            int first = trimmed.indexOf('{');
-            int last = trimmed.lastIndexOf('}');
-            if (first >= 0 && last > first) {
-                return new JSONObject(trimmed.substring(first, last + 1));
+            String extracted = extractFirstBalancedJsonObject(trimmed);
+            if (!TextUtils.isEmpty(extracted)) {
+                return new JSONObject(extracted);
             }
             throw new IOException("OpenRouter did not return folder JSON.");
         }
+    }
+
+    private static JSONArray optArray(JSONObject object, String... names) {
+        for (String name : names) {
+            JSONArray array = object.optJSONArray(name);
+            if (array != null) return array;
+        }
+        return null;
+    }
+
+    private static String optString(JSONObject object, String... names) {
+        for (String name : names) {
+            String value = object.optString(name, "");
+            if (!TextUtils.isEmpty(value)) return value;
+        }
+        return "AI";
+    }
+
+    private static int idAt(JSONArray array, int index) {
+        Object value = array.opt(index);
+        if (value instanceof Number number) return number.intValue();
+        if (value instanceof String string) {
+            try {
+                return Integer.parseInt(string.trim());
+            } catch (NumberFormatException ignored) {
+                return -1;
+            }
+        }
+        if (value instanceof JSONObject object) {
+            String id = optString(object, "id", "appId", "app_id");
+            try {
+                return Integer.parseInt(id.trim());
+            } catch (NumberFormatException ignored) {
+                return -1;
+            }
+        }
+        return -1;
+    }
+
+    private static String extractFirstBalancedJsonObject(String value) {
+        boolean inString = false;
+        boolean escaped = false;
+        int depth = 0;
+        int start = -1;
+
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (c == '\\' && inString) {
+                escaped = true;
+                continue;
+            }
+            if (c == '"') {
+                inString = !inString;
+                continue;
+            }
+            if (inString) continue;
+
+            if (c == '{') {
+                if (depth == 0) start = i;
+                depth++;
+            } else if (c == '}' && depth > 0) {
+                depth--;
+                if (depth == 0 && start >= 0) {
+                    return value.substring(start, i + 1);
+                }
+            }
+        }
+        return "";
     }
 
     private static String stripCodeFence(String value) {
@@ -298,6 +427,12 @@ public final class OpenRouterAppGrouper {
         return trimmed.length() <= MAX_PROMPT_CHARS
                 ? trimmed
                 : trimmed.substring(0, MAX_PROMPT_CHARS);
+    }
+
+    private static String trimRepairContent(String content) {
+        if (content == null) return "";
+        String trimmed = content.trim();
+        return trimmed.length() <= 8000 ? trimmed : trimmed.substring(0, 8000);
     }
 
     private static String cleanLabel(String label) {
