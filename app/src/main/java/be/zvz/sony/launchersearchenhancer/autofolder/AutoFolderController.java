@@ -6,15 +6,21 @@ import android.app.Fragment;
 import android.app.FragmentTransaction;
 import android.content.ComponentName;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.InputType;
 import android.text.TextUtils;
 import android.util.Log;
 import android.view.ContextThemeWrapper;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
+import android.widget.EditText;
+import android.widget.LinearLayout;
 import android.widget.PopupMenu;
+import android.widget.ScrollView;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import java.lang.reflect.Constructor;
@@ -46,10 +52,17 @@ public final class AutoFolderController {
     private static final int FALLBACK_ID_SORT = 0x5A1A1002;
     private static final int FALLBACK_ID_REARRANGE = 0x5A1A1003;
     private static final int FALLBACK_ID_EXIT = 0x5A1A1004;
+    private static final int MENU_ID_OPENROUTER_AUTO_FOLDER = 0x5A1A1005;
     private static final String MODULE_PACKAGE = "be.zvz.sony.launchersearchenhancer";
+    private static final String OPENROUTER_PREFS = "xlauncher_openrouter_auto_folder";
+    private static final String PREF_OPENROUTER_API_KEY = "api_key";
+    private static final String PREF_OPENROUTER_MODEL = "model";
+    private static final String PREF_OPENROUTER_PROMPT = "prompt";
+    private static final String DEFAULT_OPENROUTER_MODEL = "openrouter/auto";
     private static final String TAG = "AutoFolderController";
 
     private final SemanticAppGrouper grouper;
+    private final OpenRouterAppGrouper openRouterGrouper = new OpenRouterAppGrouper();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final ExecutorService worker = Executors.newSingleThreadExecutor(new ThreadFactory() {
@@ -98,7 +111,11 @@ public final class AutoFolderController {
                     .setVisible(inEditMode);
             menu.add(Menu.NONE, MENU_ID_AUTO_FOLDER, 3,
                             moduleString(context, module, R.string.auto_folder_menu_title,
-                                    "AI Auto Folder"))
+                                    "AI Auto Folder (Local)"))
+                    .setVisible(!inEditMode && !inSearchMode);
+            menu.add(Menu.NONE, MENU_ID_OPENROUTER_AUTO_FOLDER, 4,
+                            moduleString(context, module, R.string.auto_folder_openrouter_menu_title,
+                                    "AI Auto Folder (OpenRouter)"))
                     .setVisible(!inEditMode && !inSearchMode);
 
             popupMenu.setOnMenuItemClickListener(item ->
@@ -134,6 +151,10 @@ public final class AutoFolderController {
             }
             if (itemId == MENU_ID_AUTO_FOLDER) {
                 confirmAndStart(appsView, anchor, module);
+                return true;
+            }
+            if (itemId == MENU_ID_OPENROUTER_AUTO_FOLDER) {
+                showOpenRouterDialog(appsView, anchor, module);
                 return true;
             }
         } catch (Throwable t) {
@@ -207,13 +228,190 @@ public final class AutoFolderController {
 
         new AlertDialog.Builder(activity)
                 .setTitle(moduleString(snapshot.context, moduleContext,
-                        R.string.auto_folder_menu_title, "AI Auto Folder"))
+                        R.string.auto_folder_menu_title, "AI Auto Folder (Local)"))
                 .setMessage(message)
                 .setPositiveButton(moduleString(snapshot.context, moduleContext,
                                 R.string.auto_folder_confirm_positive, "Run"),
                         (dialog, which) -> startAutoFolder(appsView, snapshot, module, moduleContext))
                 .setNegativeButton(android.R.string.cancel, null)
                 .show();
+    }
+
+    private void showOpenRouterDialog(Object appsView, View anchor, XposedModule module) {
+        if (running.get()) {
+            toast(anchor.getContext(), module, R.string.auto_folder_already_running,
+                    "Auto foldering is already running.");
+            return;
+        }
+
+        Snapshot snapshot;
+        try {
+            snapshot = collectSnapshot(appsView);
+        } catch (Throwable t) {
+            log(module, "Failed to collect app tray snapshot for OpenRouter", t);
+            toast(anchor.getContext(), module, R.string.auto_folder_read_failed,
+                    "Couldn't read the app list.");
+            return;
+        }
+
+        if (snapshot.candidates.size() < 2) {
+            toast(snapshot.context, module, R.string.auto_folder_not_enough_apps,
+                    "There aren't enough loose apps to folder.");
+            return;
+        }
+
+        Activity activity = activityFor(appsView);
+        if (activity == null) {
+            toast(snapshot.context, module, R.string.auto_folder_launcher_unavailable,
+                    "Couldn't find the Launcher screen.");
+            return;
+        }
+
+        Context moduleContext = moduleContext(snapshot.context, module);
+        SharedPreferences prefs = openRouterPrefs(snapshot.context);
+
+        EditText apiKeyInput = new EditText(activity);
+        apiKeyInput.setSingleLine(true);
+        apiKeyInput.setInputType(InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        apiKeyInput.setText(prefs.getString(PREF_OPENROUTER_API_KEY, ""));
+        apiKeyInput.setHint(moduleString(snapshot.context, moduleContext,
+                R.string.auto_folder_openrouter_api_key_hint,
+                "sk-or-v1-..."));
+
+        EditText modelInput = new EditText(activity);
+        modelInput.setSingleLine(true);
+        modelInput.setInputType(InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_VARIATION_URI);
+        modelInput.setText(prefs.getString(PREF_OPENROUTER_MODEL, DEFAULT_OPENROUTER_MODEL));
+        modelInput.setHint(DEFAULT_OPENROUTER_MODEL);
+
+        EditText promptInput = new EditText(activity);
+        promptInput.setMinLines(5);
+        promptInput.setMaxLines(10);
+        promptInput.setInputType(InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        String defaultPrompt = moduleString(snapshot.context, moduleContext,
+                R.string.auto_folder_openrouter_default_prompt,
+                "Group similar personal apps into concise launcher folders. "
+                        + "Use the launcher language for labels. "
+                        + "Do not group apps unless the relationship is clear.");
+        promptInput.setText(prefs.getString(PREF_OPENROUTER_PROMPT, defaultPrompt));
+
+        int padding = dp(activity, 20);
+        LinearLayout content = new LinearLayout(activity);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(padding, padding / 2, padding, 0);
+
+        addDialogText(content, activity, moduleString(snapshot.context, moduleContext,
+                R.string.auto_folder_openrouter_warning,
+                "%1$d loose apps will be sent to OpenRouter as app names and package names. "
+                        + "Existing folders are not sent and will remain unchanged.",
+                snapshot.candidates.size()));
+        addDialogField(content, activity, moduleString(snapshot.context, moduleContext,
+                R.string.auto_folder_openrouter_api_key_label, "API key"), apiKeyInput);
+        addDialogField(content, activity, moduleString(snapshot.context, moduleContext,
+                R.string.auto_folder_openrouter_model_label, "Model"), modelInput);
+        addDialogField(content, activity, moduleString(snapshot.context, moduleContext,
+                R.string.auto_folder_openrouter_prompt_label, "Custom conditions"), promptInput);
+
+        ScrollView scrollView = new ScrollView(activity);
+        scrollView.addView(content);
+
+        AlertDialog dialog = new AlertDialog.Builder(activity)
+                .setTitle(moduleString(snapshot.context, moduleContext,
+                        R.string.auto_folder_openrouter_menu_title,
+                        "AI Auto Folder (OpenRouter)"))
+                .setView(scrollView)
+                .setPositiveButton(moduleString(snapshot.context, moduleContext,
+                        R.string.auto_folder_confirm_positive, "Run"), null)
+                .setNegativeButton(android.R.string.cancel, null)
+                .create();
+
+        dialog.setOnShowListener(dialogInterface ->
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+                    String apiKey = apiKeyInput.getText().toString().trim();
+                    String model = modelInput.getText().toString().trim();
+                    String prompt = promptInput.getText().toString().trim();
+
+                    if (TextUtils.isEmpty(apiKey)) {
+                        apiKeyInput.setError(moduleString(snapshot.context, moduleContext,
+                                R.string.auto_folder_openrouter_api_key_required,
+                                "API key is required."));
+                        return;
+                    }
+                    if (TextUtils.isEmpty(model)) {
+                        modelInput.setError(moduleString(snapshot.context, moduleContext,
+                                R.string.auto_folder_openrouter_model_required,
+                                "Model is required."));
+                        return;
+                    }
+                    if (TextUtils.isEmpty(prompt)) {
+                        prompt = defaultPrompt;
+                    }
+
+                    prefs.edit()
+                            .putString(PREF_OPENROUTER_API_KEY, apiKey)
+                            .putString(PREF_OPENROUTER_MODEL, model)
+                            .putString(PREF_OPENROUTER_PROMPT, prompt)
+                            .apply();
+                    dialog.dismiss();
+
+                    startOpenRouterAutoFolder(appsView, snapshot, module, moduleContext,
+                            new OpenRouterAppGrouper.Config(apiKey, model, prompt));
+                }));
+        dialog.show();
+    }
+
+    private void startOpenRouterAutoFolder(
+            Object appsView,
+            Snapshot snapshot,
+            XposedModule module,
+            Context moduleContext,
+            OpenRouterAppGrouper.Config config
+    ) {
+        if (!running.compareAndSet(false, true)) {
+            toast(snapshot.context, moduleContext, R.string.auto_folder_already_running,
+                    "Auto foldering is already running.");
+            return;
+        }
+
+        toast(snapshot.context, moduleContext, R.string.auto_folder_openrouter_analyzing,
+                "OpenRouter is analyzing your apps...");
+        worker.execute(() -> {
+            List<Group> groups;
+            try {
+                groups = openRouterGrouper.group(snapshot.context, snapshot.candidates, config);
+            } catch (Throwable t) {
+                log(module, "OpenRouter app grouping failed", t);
+                mainHandler.post(() -> {
+                    running.set(false);
+                    toast(snapshot.context, moduleContext,
+                            R.string.auto_folder_openrouter_analysis_failed,
+                            "OpenRouter analysis couldn't be completed.");
+                });
+                return;
+            }
+
+            mainHandler.post(() -> {
+                try {
+                    ApplyResult result = applyGroups(appsView, groups);
+                    if (result.folderCount == 0) {
+                        toast(snapshot.context, moduleContext, R.string.auto_folder_no_new_folders,
+                                "No new folders can be created.");
+                    } else {
+                        toast(snapshot.context, resultText(snapshot.context, moduleContext, result));
+                    }
+                } catch (Throwable t) {
+                    log(module, "Failed to apply OpenRouter auto folders", t);
+                    toast(snapshot.context, moduleContext, R.string.auto_folder_save_failed,
+                            "Couldn't save the auto folders.");
+                } finally {
+                    running.set(false);
+                }
+            });
+        });
     }
 
     private void startAutoFolder(
@@ -478,6 +676,46 @@ public final class AutoFolderController {
 
     private void hideKeyboard(Object appsView) {
         invokeNoThrow(appsView, "hideKeyboard");
+    }
+
+    private static SharedPreferences openRouterPrefs(Context context) {
+        return context.getSharedPreferences(OPENROUTER_PREFS, Context.MODE_PRIVATE);
+    }
+
+    private static void addDialogText(LinearLayout parent, Context context, String text) {
+        TextView textView = new TextView(context);
+        textView.setText(text);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        params.setMargins(0, 0, 0, dp(context, 12));
+        parent.addView(textView, params);
+    }
+
+    private static void addDialogField(
+            LinearLayout parent,
+            Context context,
+            String label,
+            EditText input
+    ) {
+        TextView labelView = new TextView(context);
+        labelView.setText(label);
+        LinearLayout.LayoutParams labelParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        labelParams.setMargins(0, dp(context, 8), 0, 0);
+        parent.addView(labelView, labelParams);
+
+        LinearLayout.LayoutParams inputParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        inputParams.setMargins(0, dp(context, 4), 0, 0);
+        parent.addView(input, inputParams);
+    }
+
+    private static int dp(Context context, int value) {
+        float density = context.getResources().getDisplayMetrics().density;
+        return Math.round(value * density);
     }
 
     private Activity activityFor(Object appsView) {

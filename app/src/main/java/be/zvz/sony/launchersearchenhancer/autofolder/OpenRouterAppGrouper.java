@@ -1,0 +1,326 @@
+package be.zvz.sony.launchersearchenhancer.autofolder;
+
+import android.content.ComponentName;
+import android.content.Context;
+import android.content.Intent;
+import android.content.ServiceConnection;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.IBinder;
+import android.os.Looper;
+import android.os.Message;
+import android.os.Messenger;
+import android.os.RemoteException;
+import android.text.TextUtils;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+
+import be.zvz.sony.launchersearchenhancer.autofolder.SemanticAppGrouper.AppCandidate;
+import be.zvz.sony.launchersearchenhancer.autofolder.SemanticAppGrouper.Group;
+import be.zvz.sony.launchersearchenhancer.openrouter.OpenRouterProxyService;
+
+public final class OpenRouterAppGrouper {
+
+    private static final String MODULE_PACKAGE = "be.zvz.sony.launchersearchenhancer";
+    private static final String PROXY_SERVICE_CLASS =
+            MODULE_PACKAGE + ".openrouter.OpenRouterProxyService";
+    private static final long REQUEST_TIMEOUT_SECONDS = 95;
+    private static final int MAX_PROMPT_CHARS = 4000;
+    private static final int MAX_LABEL_CHARS = 24;
+
+    public List<Group> group(Context context, List<AppCandidate> apps, Config config)
+            throws Exception {
+        if (context == null || apps == null || apps.size() < 2 || config == null) {
+            return Collections.emptyList();
+        }
+
+        JSONObject requestBody = buildRequest(apps, config, true);
+        String responseBody;
+        try {
+            responseBody = requestCompletion(context, config.apiKey, requestBody.toString());
+        } catch (IOException e) {
+            if (!isResponseFormatFailure(e)) throw e;
+            responseBody = requestCompletion(
+                    context,
+                    config.apiKey,
+                    buildRequest(apps, config, false).toString());
+        }
+        String content = completionContent(responseBody);
+        return parseGroups(content, apps);
+    }
+
+    private JSONObject buildRequest(
+            List<AppCandidate> apps,
+            Config config,
+            boolean requestJsonMode
+    ) throws JSONException {
+        JSONArray appItems = new JSONArray();
+        for (int i = 0; i < apps.size(); i++) {
+            AppCandidate app = apps.get(i);
+            appItems.put(new JSONObject()
+                    .put("id", i)
+                    .put("title", app.title)
+                    .put("package", app.packageName));
+        }
+
+        String prompt = trimPrompt(config.customPrompt);
+        String userContent = "Custom grouping conditions:\n"
+                + (TextUtils.isEmpty(prompt) ? "No extra conditions." : prompt)
+                + "\n\nApps to organize:\n"
+                + appItems.toString(2);
+
+        JSONArray messages = new JSONArray()
+                .put(message("system", systemPrompt()))
+                .put(message("user", userContent));
+
+        JSONObject request = new JSONObject()
+                .put("model", config.model)
+                .put("messages", messages)
+                .put("temperature", 0.1)
+                .put("max_tokens", 1800);
+        if (requestJsonMode) {
+            request.put("response_format", new JSONObject().put("type", "json_object"));
+        }
+        return request;
+    }
+
+    private static JSONObject message(String role, String content) throws JSONException {
+        return new JSONObject()
+                .put("role", role)
+                .put("content", content);
+    }
+
+    private static boolean isResponseFormatFailure(IOException e) {
+        String message = e.getMessage();
+        if (message == null) return false;
+        String lower = message.toLowerCase();
+        return lower.contains("response_format")
+                || lower.contains("json mode")
+                || lower.contains("structured output");
+    }
+
+    private static String systemPrompt() {
+        return "You organize Android launcher app tray items into folders. "
+                + "Return only valid JSON with this exact shape: "
+                + "{\"folders\":[{\"label\":\"short folder label\",\"ids\":[0,1]}]}. "
+                + "Use only ids from the provided app list. Never duplicate an id. "
+                + "Create folders only when at least 2 apps clearly belong together. "
+                + "Leave uncertain apps and singleton categories out. "
+                + "Keep labels short and suitable for a phone launcher. "
+                + "Existing user folders are already omitted from the app list and must remain unchanged.";
+    }
+
+    private String requestCompletion(Context context, String apiKey, String requestBody)
+            throws Exception {
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicBoolean bound = new AtomicBoolean(false);
+        AtomicReference<String> responseRef = new AtomicReference<>();
+        AtomicReference<Throwable> errorRef = new AtomicReference<>();
+
+        Handler replyHandler = new Handler(Looper.getMainLooper(), message -> {
+            Bundle data = message.getData();
+            if (message.what == OpenRouterProxyService.MSG_SUCCESS) {
+                responseRef.set(data == null ? "" :
+                        data.getString(OpenRouterProxyService.EXTRA_RESPONSE_BODY, ""));
+            } else if (message.what == OpenRouterProxyService.MSG_ERROR) {
+                String error = data == null ? "" :
+                        data.getString(OpenRouterProxyService.EXTRA_ERROR, "");
+                errorRef.set(new IOException(TextUtils.isEmpty(error)
+                        ? "OpenRouter request failed."
+                        : error));
+            }
+            latch.countDown();
+            return true;
+        });
+
+        Messenger replyMessenger = new Messenger(replyHandler);
+        ServiceConnection connection = new ServiceConnection() {
+            @Override
+            public void onServiceConnected(ComponentName name, IBinder service) {
+                try {
+                    Message request = Message.obtain(null, OpenRouterProxyService.MSG_CHAT_COMPLETION);
+                    Bundle data = new Bundle();
+                    data.putString(OpenRouterProxyService.EXTRA_API_KEY, apiKey);
+                    data.putString(OpenRouterProxyService.EXTRA_REQUEST_BODY, requestBody);
+                    request.setData(data);
+                    request.replyTo = replyMessenger;
+                    new Messenger(service).send(request);
+                } catch (RemoteException e) {
+                    errorRef.set(e);
+                    latch.countDown();
+                }
+            }
+
+            @Override
+            public void onServiceDisconnected(ComponentName name) {
+                if (responseRef.get() == null && errorRef.get() == null) {
+                    errorRef.set(new IOException("OpenRouter proxy service disconnected."));
+                    latch.countDown();
+                }
+            }
+        };
+
+        Intent intent = new Intent();
+        intent.setComponent(new ComponentName(MODULE_PACKAGE, PROXY_SERVICE_CLASS));
+        if (!context.bindService(intent, connection, Context.BIND_AUTO_CREATE)) {
+            throw new IOException("Could not bind OpenRouter proxy service.");
+        }
+        bound.set(true);
+
+        try {
+            if (!latch.await(REQUEST_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                throw new IOException("OpenRouter request timed out.");
+            }
+            Throwable error = errorRef.get();
+            if (error instanceof Exception exception) throw exception;
+            if (error instanceof Error serious) throw serious;
+            if (error != null) throw new IOException(error);
+            String response = responseRef.get();
+            if (TextUtils.isEmpty(response)) {
+                throw new IOException("OpenRouter returned an empty response.");
+            }
+            return response;
+        } finally {
+            if (bound.get()) {
+                try {
+                    context.unbindService(connection);
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
+
+    private static String completionContent(String responseBody) throws JSONException, IOException {
+        JSONObject response = new JSONObject(responseBody);
+        JSONArray choices = response.optJSONArray("choices");
+        if (choices == null || choices.length() == 0) {
+            throw new IOException("OpenRouter response has no choices.");
+        }
+
+        JSONObject choice = choices.optJSONObject(0);
+        JSONObject message = choice == null ? null : choice.optJSONObject("message");
+        if (message == null) {
+            throw new IOException("OpenRouter response has no message.");
+        }
+
+        Object content = message.opt("content");
+        if (content == null) throw new IOException("OpenRouter response content is empty.");
+        String text = content instanceof String ? (String) content : String.valueOf(content);
+        if (TextUtils.isEmpty(text)) throw new IOException("OpenRouter response content is empty.");
+        return text;
+    }
+
+    private static List<Group> parseGroups(String content, List<AppCandidate> apps)
+            throws JSONException, IOException {
+        JSONObject grouped = parseJsonObject(content);
+        JSONArray folders = grouped.optJSONArray("folders");
+        if (folders == null) return Collections.emptyList();
+
+        Map<Integer, AppCandidate> appById = new HashMap<>();
+        for (int i = 0; i < apps.size(); i++) {
+            appById.put(i, apps.get(i));
+        }
+
+        ArrayList<Group> result = new ArrayList<>();
+        Set<String> claimedKeys = new HashSet<>();
+        for (int i = 0; i < folders.length(); i++) {
+            JSONObject folder = folders.optJSONObject(i);
+            if (folder == null) continue;
+
+            String label = cleanLabel(folder.optString("label", "AI"));
+            JSONArray ids = folder.optJSONArray("ids");
+            if (ids == null) continue;
+
+            ArrayList<AppCandidate> groupedApps = new ArrayList<>();
+            for (int j = 0; j < ids.length(); j++) {
+                AppCandidate app = appById.get(ids.optInt(j, -1));
+                if (app == null || claimedKeys.contains(app.key)) continue;
+                groupedApps.add(app);
+                claimedKeys.add(app.key);
+            }
+
+            if (groupedApps.size() >= 2) {
+                result.add(new Group(label, groupedApps));
+            } else {
+                for (AppCandidate app : groupedApps) {
+                    claimedKeys.remove(app.key);
+                }
+            }
+        }
+
+        result.sort(Comparator.comparingInt(Group::firstIndex));
+        return result;
+    }
+
+    private static JSONObject parseJsonObject(String content) throws JSONException, IOException {
+        String trimmed = stripCodeFence(content == null ? "" : content.trim());
+        try {
+            return new JSONObject(trimmed);
+        } catch (JSONException ignored) {
+            int first = trimmed.indexOf('{');
+            int last = trimmed.lastIndexOf('}');
+            if (first >= 0 && last > first) {
+                return new JSONObject(trimmed.substring(first, last + 1));
+            }
+            throw new IOException("OpenRouter did not return folder JSON.");
+        }
+    }
+
+    private static String stripCodeFence(String value) {
+        if (!value.startsWith("```")) return value;
+        int firstNewline = value.indexOf('\n');
+        int lastFence = value.lastIndexOf("```");
+        if (firstNewline >= 0 && lastFence > firstNewline) {
+            return value.substring(firstNewline + 1, lastFence).trim();
+        }
+        return value;
+    }
+
+    private static String trimPrompt(String prompt) {
+        if (prompt == null) return "";
+        String trimmed = prompt.trim();
+        return trimmed.length() <= MAX_PROMPT_CHARS
+                ? trimmed
+                : trimmed.substring(0, MAX_PROMPT_CHARS);
+    }
+
+    private static String cleanLabel(String label) {
+        String cleaned = label == null ? "" : label
+                .replace('\r', ' ')
+                .replace('\n', ' ')
+                .replace('\t', ' ')
+                .trim();
+        if (TextUtils.isEmpty(cleaned)) return "AI";
+        return cleaned.length() <= MAX_LABEL_CHARS
+                ? cleaned
+                : cleaned.substring(0, MAX_LABEL_CHARS).trim();
+    }
+
+    public static final class Config {
+        public final String apiKey;
+        public final String model;
+        public final String customPrompt;
+
+        public Config(String apiKey, String model, String customPrompt) {
+            this.apiKey = apiKey == null ? "" : apiKey.trim();
+            this.model = model == null ? "" : model.trim();
+            this.customPrompt = customPrompt == null ? "" : customPrompt.trim();
+        }
+    }
+}

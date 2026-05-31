@@ -149,7 +149,7 @@ public final class SemanticAppGrouper {
         public final List<AppCandidate> apps;
         private final int firstIndex;
 
-        private Group(String label, List<AppCandidate> apps) {
+        public Group(String label, List<AppCandidate> apps) {
             this.label = label;
             this.apps = Collections.unmodifiableList(new ArrayList<>(apps));
             int first = Integer.MAX_VALUE;

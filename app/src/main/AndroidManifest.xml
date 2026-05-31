@@ -2,10 +2,18 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <application
         android:label="@string/app_name"
         android:description="@string/xposed_description"
         android:supportsRtl="true"
-        tools:ignore="AllowBackup,MissingApplicationIcon" />
+        tools:ignore="AllowBackup,MissingApplicationIcon">
+
+        <service
+            android:name=".openrouter.OpenRouterProxyService"
+            android:exported="true" />
+
+    </application>
 
 </manifest>

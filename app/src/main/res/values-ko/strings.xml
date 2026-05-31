@@ -2,18 +2,29 @@
     <string name="app_name">Xperia Launcher Search Enhancer</string>
     <string name="xposed_description">Xperia Launcher 검색 알고리즘 강화</string>
 
-    <string name="auto_folder_menu_title">AI 자동 폴더화</string>
+    <string name="auto_folder_menu_title">AI 자동 폴더화 (로컬)</string>
+    <string name="auto_folder_openrouter_menu_title">AI 자동 폴더화 (OpenRouter)</string>
     <string name="auto_folder_action_failed">작업을 실행하지 못했습니다.</string>
     <string name="auto_folder_already_running">이미 자동 폴더화를 실행 중입니다.</string>
     <string name="auto_folder_read_failed">앱 목록을 읽지 못했습니다.</string>
     <string name="auto_folder_not_enough_apps">폴더화할 앱이 충분하지 않습니다.</string>
     <string name="auto_folder_launcher_unavailable">Launcher 화면을 찾지 못했습니다.</string>
-    <string name="auto_folder_confirm_message">폴더 밖 앱 %1$d개를 AI로 분석해 비슷한 앱끼리 묶습니다.\n\n기존 폴더와 그 안의 앱은 그대로 유지됩니다.</string>
+    <string name="auto_folder_confirm_message">폴더 밖 앱 %1$d개를 로컬 AI로 분석해 비슷한 앱끼리 묶습니다.\n\n기존 폴더와 그 안의 앱은 그대로 유지됩니다.</string>
     <string name="auto_folder_confirm_positive">실행</string>
     <string name="auto_folder_analyzing">AI가 앱을 분석 중입니다...</string>
+    <string name="auto_folder_openrouter_analyzing">OpenRouter가 앱을 분석 중입니다...</string>
     <string name="auto_folder_analysis_failed">AI 분석을 완료하지 못했습니다.</string>
+    <string name="auto_folder_openrouter_analysis_failed">OpenRouter 분석을 완료하지 못했습니다.</string>
     <string name="auto_folder_no_new_folders">새로 만들 수 있는 폴더가 없습니다.</string>
     <string name="auto_folder_save_failed">자동 폴더화를 저장하지 못했습니다.</string>
+    <string name="auto_folder_openrouter_warning">폴더 밖 앱 %1$d개의 앱 이름과 패키지명이 OpenRouter로 전송됩니다. 기존 폴더는 전송되지 않으며 그대로 유지됩니다.</string>
+    <string name="auto_folder_openrouter_api_key_label">API 키</string>
+    <string name="auto_folder_openrouter_api_key_hint">sk-or-v1-...</string>
+    <string name="auto_folder_openrouter_api_key_required">API 키가 필요합니다.</string>
+    <string name="auto_folder_openrouter_model_label">모델</string>
+    <string name="auto_folder_openrouter_model_required">모델이 필요합니다.</string>
+    <string name="auto_folder_openrouter_prompt_label">커스텀 조건</string>
+    <string name="auto_folder_openrouter_default_prompt">비슷한 개인 앱끼리 실용적인 런처 폴더로 묶어줘. 폴더명은 런처 언어에 맞게 짧게 써줘. 관계가 명확한 앱만 폴더로 만들고, 애매한 앱이나 하나뿐인 분류는 그대로 남겨줘. 너무 넓거나 장난스러운 이름보다 실제로 쓰기 좋은 분류를 우선해줘.</string>
 
     <plurals name="auto_folder_result">
         <item quantity="other">%1$d개 폴더에 %2$d개 앱을 정리했습니다.</item>
